@@ -54,10 +54,6 @@ interface EnhancedPyProject extends PyProject {
   };
 }
 
-/**
- * Helper to wrap arbitrary updater-like objects and expose updateContent(old?: string): string
- * so CompositeUpdater and pipeline can call them reliably.
- */
 function wrapUpdater(u: any): {updateContent(old?: string): string} {
   if (!u) {
     return {updateContent: (old?: string) => old || ''};
@@ -81,10 +77,6 @@ function wrapUpdater(u: any): {updateContent(old?: string): string} {
   };
 }
 
-/**
- * Text-based updater that edits or creates the [tool.release-please.extra-versions]
- * section inside a pyproject.toml file. Exposes updateContent(old?: string): string.
- */
 class PyProjectExtraVersionsUpdater {
   private extraVersions: Record<string, string>;
   constructor(options: {extraVersions: Record<string, string>}) {
@@ -92,22 +84,16 @@ class PyProjectExtraVersionsUpdater {
   }
 
   updateContent(oldContent?: string): string {
-    let content = oldContent || '';
+    const content = oldContent || '';
 
+    // If there's a declared section, merge into it
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
     if (headerRe.test(content)) {
       const start = content.search(headerRe);
-      if (start === -1) return this.appendNewSection(content);
-
       const after = content.slice(start);
       const nextTableRe = /^\s*\[.+\]/m;
       const m = nextTableRe.exec(after.slice(1));
-      let endIndex: number;
-      if (m && m.index >= 0) {
-        endIndex = start + 1 + m.index;
-      } else {
-        endIndex = content.length;
-      }
+      const endIndex = m && m.index >= 0 ? start + 1 + m.index : content.length;
 
       const before = content.slice(0, start);
       const section = content.slice(start, endIndex);
@@ -116,14 +102,13 @@ class PyProjectExtraVersionsUpdater {
       const lines = section.split(/\r?\n/);
       const existing: Record<string, string> = {};
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
+        const t = line.trim();
+        if (!t || t.startsWith('#') || t.startsWith('[')) continue;
         const eq = line.indexOf('=');
         if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
+        const k = line.slice(0, eq).trim();
         const valRaw = line.slice(eq + 1).trim();
-        const val = valRaw.replace(/^['"]|['"]$/g, '');
-        existing[key] = val;
+        existing[k] = valRaw.replace(/^['"]|['"]$/g, '');
       }
 
       const merged = {...existing};
@@ -132,14 +117,10 @@ class PyProjectExtraVersionsUpdater {
       const headerLine = '[tool.release-please.extra-versions]';
       const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}"`);
       const newSection = [headerLine, ...entryLines].join('\n') + '\n';
-
       return before + newSection + afterSection;
-    } else {
-      return this.appendNewSection(content);
     }
-  }
 
-  private appendNewSection(content: string): string {
+    // No existing section: append a new one at EOF
     const headerLine = '\n[tool.release-please.extra-versions]\n';
     const entryLines = Object.keys(this.extraVersions).sort().map(k => `${k} = "${this.extraVersions[k]}"`);
     return content + headerLine + entryLines.join('\n') + '\n';
@@ -149,9 +130,7 @@ class PyProjectExtraVersionsUpdater {
 export class PythonWorkspace extends WorkspacePlugin<Package> {
   private normalizedToCanonical: Map<string, string> = new Map();
   private extraVersions: Map<string, string> = new Map();
-  // Collected pyproject.toml paths that exist on the target branch (relative paths)
   private pyprojectPaths: Set<string> = new Set();
-  // Map path -> file content of pyproject.toml (string) when available
   private pyprojectContents: Map<string, string> = new Map();
 
   constructor(
@@ -174,86 +153,87 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
-    // collect all pyproject.toml files in repo (under targetBranch)
+    // discover all pyproject.toml files and cache contents
     try {
-      const allPyproj = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
-      for (const p of allPyproj) {
-        const pPath = typeof p === 'string' ? p : (p as any).path;
-        if (!pPath) continue;
-        this.pyprojectPaths.add(pPath);
+      const all = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
+      for (const entry of all) {
+        const p = typeof entry === 'string' ? entry : (entry as any).path;
+        if (!p) continue;
+        this.pyprojectPaths.add(p);
         try {
-          const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
-          if (f && typeof f.parsedContent === 'string') {
-            this.pyprojectContents.set(pPath, f.parsedContent);
-          }
+          const f = await this.github.getFileContentsOnBranch(p, this.targetBranch);
+          if (f && typeof f.parsedContent === 'string') this.pyprojectContents.set(p, f.parsedContent);
         } catch {
-          // ignore read errors for individual pyproject files
+          // ignore per-file read errors
         }
       }
       this.logger.info(`found pyproject paths: ${Array.from(this.pyprojectPaths).join(', ')}`);
       this.logger.info(`pyprojectContents keys: ${Array.from(this.pyprojectContents.keys()).join(', ')}`);
     } catch (e) {
-      this.logger.debug('scan pyproject.toml failed', (e as Error).message);
+      this.logger.debug('findFilesByFilenameAndRef failed: ' + (e as Error).message);
     }
 
-    // Try to detect repo-root pyproject.toml once and add to pyprojectPaths if present
+    // also attempt repo-root pyproject.toml
     try {
-      const rootProj = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
-      if (rootProj && rootProj.parsedContent !== undefined) {
+      const root = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
+      if (root && root.parsedContent !== undefined) {
         this.pyprojectPaths.add('pyproject.toml');
-        if (typeof rootProj.parsedContent === 'string') this.pyprojectContents.set('pyproject.toml', rootProj.parsedContent);
+        if (typeof root.parsedContent === 'string') this.pyprojectContents.set('pyproject.toml', root.parsedContent);
       }
     } catch {
-      // no root pyproject
+      // ignore
     }
 
+    // build package list from repositoryConfig
     for (const path in this.repositoryConfig) {
       const cfg = this.repositoryConfig[path];
       if (cfg.releaseType !== 'python') continue;
 
       const candidate = candidatesByPath.get(path);
+      const pyprojectRel = addPath(path, 'pyproject.toml');
 
       let setupCfgContent: string | null = null;
       let setupPyContent: string | null = null;
       let pyprojectContent: string | null = null;
-      const pyprojectRelPath = addPath(path, 'pyproject.toml');
 
       if (candidate) {
         const uCfg = candidate.pullRequest.updates.find(u => u.path === addPath(path, 'setup.cfg'));
         if (uCfg?.cachedFileContents) setupCfgContent = uCfg.cachedFileContents.parsedContent;
         const uPy = candidate.pullRequest.updates.find(u => u.path === addPath(path, 'setup.py'));
         if (uPy?.cachedFileContents) setupPyContent = uPy.cachedFileContents.parsedContent;
-        const uProj = candidate.pullRequest.updates.find(u => u.path === pyprojectRelPath);
+        const uProj = candidate.pullRequest.updates.find(u => u.path === pyprojectRel);
         if (uProj?.cachedFileContents) pyprojectContent = uProj.cachedFileContents.parsedContent;
       }
 
       try {
         if (!pyprojectContent) {
-          const f = await this.github.getFileContentsOnBranch(pyprojectRelPath, this.targetBranch);
+          const f = await this.github.getFileContentsOnBranch(pyprojectRel, this.targetBranch);
           pyprojectContent = f.parsedContent;
         }
         if (pyprojectContent !== null && pyprojectContent !== undefined) {
-          this.pyprojectPaths.add(pyprojectRelPath);
-          if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRelPath, pyprojectContent);
+          this.pyprojectPaths.add(pyprojectRel);
+          if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRel, pyprojectContent);
         }
       } catch {
-        /* ignore missing per-package pyproject */
+        // ignore missing per-package pyproject
       }
+
       try {
         if (!setupCfgContent) {
           const f = await this.github.getFileContentsOnBranch(addPath(path, 'setup.cfg'), this.targetBranch);
           setupCfgContent = f.parsedContent;
         }
       } catch {
-        /* ignore */
+        // ignore
       }
+
       try {
         if (!setupPyContent) {
           const f = await this.github.getFileContentsOnBranch(addPath(path, 'setup.py'), this.targetBranch);
           setupPyContent = f.parsedContent;
         }
       } catch {
-        /* ignore */
+        // ignore
       }
 
       let name = path;
@@ -271,7 +251,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
         } catch {
-          this.logger.debug(`Failed to parse pyproject.toml for ${path}`);
+          this.logger.debug(`parsePyProject failed for ${path}`);
         }
       }
 
@@ -309,7 +289,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     // build normalized -> canonical map
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
-
     this.logger.info(`normalizedToCanonical keys: ${Array.from(this.normalizedToCanonical.keys()).join(', ')}`);
 
     return {allPackages: packages, candidatesByPackage};
@@ -318,9 +297,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   protected bumpVersion(pkg: Package): Version {
     const norm = normalizePkgName(pkg.name);
     const extra = this.extraVersions.get(norm);
-    if (extra) {
-      return Version.parse(extra);
-    }
+    if (extra) return Version.parse(extra);
     if (!pkg.version) {
       this.logger.info(`No static version for ${pkg.name}; falling back to 0.1.0`);
       return Version.parse('0.1.0');
@@ -428,7 +405,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       await this.github.getFileContentsOnBranch(addPath(pkg.path, 'CHANGELOG.md'), this.targetBranch);
       updates.push({path: addPath(pkg.path, 'CHANGELOG.md'), createIfMissing: false, updater: new Changelog({version: newVersion, changelogEntry: dependencyNotes})});
     } catch {
-      /* no changelog; skip */
+      // no changelog; skip
     }
 
     const canonical = this.normalizedToCanonical.get(normName) || pkg.name;
@@ -452,13 +429,12 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     const primary = candidates[0];
 
+    // merge metadata from other candidates into primary
     for (let i = 1; i < candidates.length; i++) {
       const c = candidates[i];
-
       for (const l of c.pullRequest.labels) {
         if (!primary.pullRequest.labels.includes(l)) primary.pullRequest.labels.push(l);
       }
-
       for (const u of c.pullRequest.updates) {
         const existing = primary.pullRequest.updates.find(x => x.path === u.path);
         if (!existing) {
@@ -467,17 +443,16 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           existing.updater.changelogEntry = appendDependenciesSectionToChangelog(existing.updater.changelogEntry, u.updater.changelogEntry, this.logger);
         }
       }
-
       if (c.pullRequest.draft && !primary.pullRequest.draft) {
         primary.pullRequest = {...primary.pullRequest, draft: true};
       }
-
       for (const rd of c.pullRequest.body.releaseData) {
         const exists = primary.pullRequest.body.releaseData.some(p => p.component === rd.component && String(p.version) === String(rd.version));
         if (!exists) primary.pullRequest.body.releaseData.push(rd);
       }
     }
 
+    // aggregate extra notes into changelogs
     const extraNotes: string[] = [];
     for (let i = 1; i < candidates.length; i++) {
       for (const rd of candidates[i].pullRequest.body.releaseData) {
@@ -499,82 +474,84 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // Build normalizedUpdated map from aggregated primary.releaseData entries
+    // Build normalizedUpdated map
     const normalizedUpdated = new Map<string, Version>();
     for (const rd of primary.pullRequest.body.releaseData) {
       if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
     }
 
-    // If we have any updates, prepare extraToWrite and add PyProjectExtraVersionsUpdater for relevant pyproject paths only
-    if (normalizedUpdated.size > 0) {
-      const extraToWrite: Record<string, string> = {};
-      normalizedUpdated.forEach((v, k) => {
-        const canonical = this.normalizedToCanonical.get(k) || k;
-        extraToWrite[canonical] = String(v);
-      });
+    if (normalizedUpdated.size === 0) {
+      this.logger.info('normalizedUpdated is empty; no extra-versions to write.');
+      return [primary];
+    }
 
-      this.logger.info(`extraToWrite keys: ${Object.keys(extraToWrite).join(', ')}`);
-      this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
+    // Build extraToWrite map keyed by canonical package names
+    const extraToWrite: Record<string, string> = {};
+    normalizedUpdated.forEach((v, k) => {
+      const canonical = this.normalizedToCanonical.get(k) || k;
+      extraToWrite[canonical] = String(v);
+    });
 
-      const keysToWrite = Object.keys(extraToWrite);
-      if (keysToWrite.length === 0) {
-        this.logger.info('No keys to write; skipping extra-versions patching.');
+    this.logger.info(`extraToWrite keys: ${Object.keys(extraToWrite).join(', ')}`);
+    this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
+
+    const keysToWrite = Object.keys(extraToWrite);
+
+    for (const projPath of Array.from(this.pyprojectPaths)) {
+      const content = this.pyprojectContents.get(projPath) || '';
+      this.logger.info(`Checking ${projPath} for keys: ${keysToWrite.join(', ')}`);
+      this.logger.debug(`Content head for ${projPath}:\n${content.split(/\n/).slice(0, 80).join('\n')}`);
+
+      const matchedKeys: string[] = [];
+
+      // Try: 1) detect explicit section and merge (handled by updater), 2) detect explicit key assignments anywhere
+      // We'll consider a project matched when ANY canonical key (normalized) appears in the file in a recognizable assignment form.
+      const lowerContent = content.toLowerCase();
+
+      for (const canonical of keysToWrite) {
+        const normCanonical = normalizePkgName(canonical);
+        // generate candidate name variants that commonly appear in pyproject keys:
+        const variants = new Set<string>();
+        variants.add(normCanonical); // e.g., testmoduleb
+        variants.add(normCanonical.replace(/-/g, '_')); // testmoduleb -> testmoduleb (idempotent) but safe
+        // also check with underscores collapsed or hyphens collapsed
+        variants.add(normCanonical.replace(/[-_]/g, '')); // testmoduleb => testmoduleb
+        // check original canonical as-is (case-preserved)
+        variants.add(canonical.toLowerCase());
+        // also check with possible package name prefix (no-op here but future-proof)
+        for (const v of Array.from(variants)) {
+          // match assignment like: key = "0.1.0" or key=0.1.0 or key = '0.1.0' optionally with trailing comment
+          const esc = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const re = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
+          if (re.test(lowerContent)) {
+            matchedKeys.push(canonical);
+            break;
+          }
+        }
+      }
+
+      // Also treat file as matched if it declares the section [tool.release-please.extra-versions]
+      const hasSection = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content);
+
+      if (matchedKeys.length === 0 && !hasSection) {
+        this.logger.info(`Skipping ${projPath} — matchedKeys: none; hasSection: ${hasSection}`);
+        continue;
+      }
+
+      this.logger.info(`Will update ${projPath} (matchedKeys: ${matchedKeys.length > 0 ? matchedKeys.join(', ') : 'section-only'})`);
+      const existing = primary.pullRequest.updates.find(u => u.path === projPath);
+      const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
+      if (existing) {
+        existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
+        this.logger.info(`Composed extra-versions updater into existing updater for ${projPath}`);
       } else {
-        this.logger.info(`keysToWrite: ${keysToWrite.join(', ')}`);
+        primary.pullRequest.updates.push({
+          path: projPath,
+          createIfMissing: false,
+          updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
+        } as any);
+        this.logger.info(`Added pyproject extra-versions updater for ${projPath}`);
       }
-
-      for (const projPath of Array.from(this.pyprojectPaths)) {
-        const content = this.pyprojectContents.get(projPath);
-        let shouldAdd = false;
-        const matchedKeys: string[] = [];
-
-        // Logging to help debug why a given pyproject was or wasn't matched
-        this.logger.info(`Checking ${projPath} for keys: ${keysToWrite.join(', ')}`);
-        if (content) {
-          this.logger.debug(`Content head for ${projPath}:\n${content.split(/\n/).slice(0, 60).join('\n')}`);
-        } else {
-          this.logger.debug(`No cached content for ${projPath} (cache miss).`);
-        }
-
-        if (content) {
-          const lowerContent = content.toLowerCase();
-          for (const k of keysToWrite) {
-            const lowerK = k.toLowerCase();
-            const esc = lowerK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // Match common forms of key assignment, case-insensitive via lowerContent
-            const keyRe = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
-            if (keyRe.test(lowerContent)) matchedKeys.push(k);
-          }
-          if (matchedKeys.length > 0) {
-            shouldAdd = true;
-          } else if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
-            // file explicitly declares section; allow updating as a central config
-            shouldAdd = true;
-          }
-        }
-
-        if (!shouldAdd) {
-          this.logger.info(`Skipping ${projPath} — matchedKeys: ${matchedKeys.join(', ') || 'none'}`);
-          continue;
-        }
-
-        this.logger.info(`Will update ${projPath} (matchedKeys: ${matchedKeys.join(', ') || 'section-only'})`);
-        const existing = primary.pullRequest.updates.find(u => u.path === projPath);
-        const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
-        if (existing) {
-          existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
-          this.logger.info(`Composed extra-versions updater into existing updater for ${projPath}`);
-        } else {
-          primary.pullRequest.updates.push({
-            path: projPath,
-            createIfMissing: false,
-            updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
-          } as any);
-          this.logger.info(`Added pyproject extra-versions updater for ${projPath}`);
-        }
-      }
-    } else {
-      this.logger.info('normalizedUpdated is empty; no extra-versions entries to write.');
     }
 
     return [primary];
@@ -733,13 +710,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   }
 }
 
-/**
- * Normalize package/dependency names for comparison:
- * - strip extras (foo[bar])
- * - strip markers (foo; python_version<"3.8")
- * - lower-case
- * - normalize underscores to hyphens
- */
 function normalizePkgName(name: string): string {
   if (!name) return name;
   const beforeMarker = name.split(';')[0];
