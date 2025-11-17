@@ -519,10 +519,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       for (const projPath of Array.from(this.pyprojectPaths)) {
         const content = this.pyprojectContents.get(projPath);
         let shouldAdd = false;
+
         if (content) {
+          // Only consider files that explicitly declare the extra-versions table
           if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
-            shouldAdd = true;
-          } else {
+            // Ensure this file already mentions at least one key we want to change; otherwise skip (conservative)
             for (const k of keysToWrite) {
               const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const keyRe = new RegExp('^\\s*' + esc + '\\s*=', 'm');
@@ -531,14 +532,18 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
                 break;
               }
             }
+          } else {
+            // No explicit section: skip to avoid blind edits to unrelated module pyproject files
+            shouldAdd = false;
           }
         } else {
-          // if we couldn't fetch content, skip to be conservative
-          this.logger.debug(`No cached content for ${projPath}; skipping unless already present in updates`);
+          // No cached content: skip to avoid blind updates
+          this.logger.debug(`No cached content for ${projPath}; skipping.`);
+          shouldAdd = false;
         }
 
         if (!shouldAdd) {
-          this.logger.info(`Skipping ${projPath} (no extra-versions header or matching keys).`);
+          this.logger.info(`Skipping ${projPath} (no matching extra-versions keys for this update).`);
           continue;
         }
 
