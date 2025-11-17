@@ -151,6 +151,8 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   private extraVersions: Map<string, string> = new Map();
   // Collected pyproject.toml paths that exist on the target branch (relative paths)
   private pyprojectPaths: Set<string> = new Set();
+  // Map path -> file content of pyproject.toml (string) when available
+  private pyprojectContents: Map<string, string> = new Map();
 
   constructor(
     github: GitHub,
@@ -172,10 +174,34 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
+    // collect all pyproject.toml files in repo (under targetBranch)
+    try {
+      const allPyproj = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
+      for (const p of allPyproj) {
+        const pPath = typeof p === 'string' ? p : (p as any).path;
+        if (!pPath) continue;
+        this.pyprojectPaths.add(pPath);
+        try {
+          const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
+          if (f && typeof f.parsedContent === 'string') {
+            this.pyprojectContents.set(pPath, f.parsedContent);
+          }
+        } catch {
+          // ignore read errors for individual pyproject files
+        }
+      }
+      this.logger.info(`found pyproject paths: ${Array.from(this.pyprojectPaths).join(', ')}`);
+    } catch (e) {
+      this.logger.debug('scan pyproject.toml failed', (e as Error).message);
+    }
+
     // Try to detect repo-root pyproject.toml once and add to pyprojectPaths if present
     try {
       const rootProj = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
-      if (rootProj && rootProj.parsedContent !== undefined) this.pyprojectPaths.add('pyproject.toml');
+      if (rootProj && rootProj.parsedContent !== undefined) {
+        this.pyprojectPaths.add('pyproject.toml');
+        if (typeof rootProj.parsedContent === 'string') this.pyprojectContents.set('pyproject.toml', rootProj.parsedContent);
+      }
     } catch {
       // no root pyproject
     }
@@ -205,8 +231,10 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           const f = await this.github.getFileContentsOnBranch(pyprojectRelPath, this.targetBranch);
           pyprojectContent = f.parsedContent;
         }
-        // if we found a pyproject for this package, register its path
-        if (pyprojectContent !== null && pyprojectContent !== undefined) this.pyprojectPaths.add(pyprojectRelPath);
+        if (pyprojectContent !== null && pyprojectContent !== undefined) {
+          this.pyprojectPaths.add(pyprojectRelPath);
+          if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRelPath, pyprojectContent);
+        }
       } catch {
         /* ignore missing per-package pyproject */
       }
@@ -280,6 +308,8 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     // build normalized -> canonical map
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
+
+    this.logger.info(`normalizedToCanonical keys: ${Array.from(this.normalizedToCanonical.keys()).join(', ')}`);
 
     return {allPackages: packages, candidatesByPackage};
   }
@@ -474,7 +504,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
     }
 
-    // If we have any updates, prepare extraToWrite and add PyProjectExtraVersionsUpdater
+    // If we have any updates, prepare extraToWrite and add PyProjectExtraVersionsUpdater for relevant pyproject paths only
     if (normalizedUpdated.size > 0) {
       const extraToWrite: Record<string, string> = {};
       normalizedUpdated.forEach((v, k) => {
@@ -482,22 +512,52 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         extraToWrite[canonical] = String(v);
       });
 
-      // For each known pyproject path in repository, ensure an updater exists in primary.pullRequest.updates
+      this.logger.info(`extraToWrite keys: ${Object.keys(extraToWrite).join(', ')}`);
+      this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
+
+      const keysToWrite = Object.keys(extraToWrite);
       for (const projPath of Array.from(this.pyprojectPaths)) {
+        const content = this.pyprojectContents.get(projPath);
+        let shouldAdd = false;
+        if (content) {
+          if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
+            shouldAdd = true;
+          } else {
+            for (const k of keysToWrite) {
+              const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const keyRe = new RegExp('^\\s*' + esc + '\\s*=', 'm');
+              if (keyRe.test(content)) {
+                shouldAdd = true;
+                break;
+              }
+            }
+          }
+        } else {
+          // if we couldn't fetch content, skip to be conservative
+          this.logger.debug(`No cached content for ${projPath}; skipping unless already present in updates`);
+        }
+
+        if (!shouldAdd) {
+          this.logger.info(`Skipping ${projPath} (no extra-versions header or matching keys).`);
+          continue;
+        }
+
         const existing = primary.pullRequest.updates.find(u => u.path === projPath);
         const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
         if (existing) {
-          // compose existing updater with our extra-versions updater
           existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
+          this.logger.info(`Composed extra-versions updater into existing updater for ${projPath}`);
         } else {
-          // add a new update entry for that pyproject path
           primary.pullRequest.updates.push({
             path: projPath,
             createIfMissing: false,
-            updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any, // safe shim: Composite around single updater
+            updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
           } as any);
+          this.logger.info(`Added pyproject extra-versions updater for ${projPath}`);
         }
       }
+    } else {
+      this.logger.info('normalizedUpdated is empty; no extra-versions entries to write.');
     }
 
     return [primary];
