@@ -528,22 +528,29 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         let shouldAdd = false;
         const matchedKeys: string[] = [];
 
+        // Logging to help debug why a given pyproject was or wasn't matched
+        this.logger.info(`Checking ${projPath} for keys: ${keysToWrite.join(', ')}`);
+        if (content) {
+          this.logger.debug(`Content head for ${projPath}:\n${content.split(/\n/).slice(0, 60).join('\n')}`);
+        } else {
+          this.logger.debug(`No cached content for ${projPath} (cache miss).`);
+        }
+
         if (content) {
           const lowerContent = content.toLowerCase();
           for (const k of keysToWrite) {
             const lowerK = k.toLowerCase();
             const esc = lowerK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const keyRe = new RegExp('^\\s*' + esc + '\\s*=', 'm');
+            // Match common forms of key assignment, case-insensitive via lowerContent
+            const keyRe = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
             if (keyRe.test(lowerContent)) matchedKeys.push(k);
           }
           if (matchedKeys.length > 0) {
             shouldAdd = true;
           } else if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
-            // file explicitly declares section; allow updating (central config)
+            // file explicitly declares section; allow updating as a central config
             shouldAdd = true;
           }
-        } else {
-          this.logger.debug(`No cached content for ${projPath}; skipping.`);
         }
 
         if (!shouldAdd) {
