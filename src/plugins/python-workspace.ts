@@ -55,10 +55,36 @@ interface EnhancedPyProject extends PyProject {
 }
 
 /**
- * Text-based updater that edits or creates the [tool.release-please.extra-versions]
- * section inside a pyproject.toml file.
- *
- * It exposes updateContent(old?: string): string to match updater contract.
+ * Helper to wrap arbitrary updater-like objects and expose updateContent(old?: string): string
+ * so CompositeUpdater and pipeline can call them reliably.
+ */
+function wrapUpdater(u: any): {updateContent(old?: string): string} {
+  if (!u) {
+    return {updateContent: (old?: string) => old || ''};
+  }
+  if (typeof u.updateContent === 'function') return u;
+  if (typeof u.update === 'function') {
+    return {updateContent: (old?: string) => u.update(old)};
+  }
+  if (typeof u.apply === 'function') {
+    return {updateContent: (old?: string) => u.apply(old)};
+  }
+  if (typeof u.transform === 'function') {
+    return {updateContent: (old?: string) => u.transform(old)};
+  }
+  // If object has toString, use it; otherwise no-op.
+  return {
+    updateContent: (old?: string) => {
+      if (typeof u === 'string') return u;
+      if (u && typeof u.toString === 'function') return u.toString();
+      return old || '';
+    },
+  };
+}
+
+/**
+ * Text-based updater that edits or creates the [tool.release-please.extra-versions] section
+ * inside a pyproject.toml file. Exposes updateContent(old?: string): string.
  */
 class PyProjectExtraVersionsUpdater {
   private extraVersions: Record<string, string>;
@@ -71,14 +97,12 @@ class PyProjectExtraVersionsUpdater {
 
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
     if (headerRe.test(content)) {
-      // Find section start
       const start = content.search(headerRe);
       if (start === -1) return this.appendNewSection(content);
 
-      // Find end of section (next top-level [section] or EOF)
       const after = content.slice(start);
       const nextTableRe = /^\s*\[.+\]/m;
-      const m = nextTableRe.exec(after.slice(1)); // skip header line first char
+      const m = nextTableRe.exec(after.slice(1));
       let endIndex: number;
       if (m && m.index >= 0) {
         endIndex = start + 1 + m.index;
@@ -90,7 +114,6 @@ class PyProjectExtraVersionsUpdater {
       const section = content.slice(start, endIndex);
       const afterSection = content.slice(endIndex);
 
-      // Parse existing entries
       const lines = section.split(/\r?\n/);
       const existing: Record<string, string> = {};
       for (const line of lines) {
@@ -269,21 +292,23 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     existingCandidate.pullRequest.updates = existingCandidate.pullRequest.updates.map(update => {
       if (update.path === addPath(existingCandidate.path, 'setup.cfg')) {
-        update.updater = new CompositeUpdater(update.updater, new SetupCfg({version: newVersion}));
+        update.updater = new CompositeUpdater(wrapUpdater(update.updater) as any, wrapUpdater(new SetupCfg({version: newVersion})) as any) as any;
       } else if (update.path === addPath(existingCandidate.path, 'setup.py')) {
-        update.updater = new CompositeUpdater(update.updater, new SetupPy({version: newVersion}));
+        update.updater = new CompositeUpdater(wrapUpdater(update.updater) as any, wrapUpdater(new SetupPy({version: newVersion})) as any) as any;
       } else if (update.path === addPath(existingCandidate.path, 'pyproject.toml')) {
-        // compose updater to also write extra-versions when applicable
         const extraToWrite: Record<string, string> = {};
         normalizedUpdated.forEach((v, k) => {
           const canonical = this.normalizedToCanonical.get(k) || k;
           extraToWrite[canonical] = String(v);
         });
+        const base = wrapUpdater(update.updater);
+        const pyprojUpd = wrapUpdater(new PyProjectToml({version: newVersion}));
         if (Object.keys(extraToWrite).length > 0) {
-          // CompositeUpdater accepts multiple updaters (implementation-specific); if not, adapt to your CompositeUpdater API.
-          update.updater = new CompositeUpdater(update.updater, new PyProjectToml({version: newVersion}), new (PyProjectExtraVersionsUpdater as any)({extraVersions: extraToWrite}) as any);
+          const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
+          // nest CompositeUpdater to avoid assuming constructor accepts >2 args
+          update.updater = new CompositeUpdater(new CompositeUpdater(base as any, pyprojUpd as any) as any, extraUpd as any) as any;
         } else {
-          update.updater = new CompositeUpdater(update.updater, new PyProjectToml({version: newVersion}));
+          update.updater = new CompositeUpdater(base as any, pyprojUpd as any) as any;
         }
       }
       return update;
@@ -294,7 +319,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       .map(u => u.path);
     for (const f of versionFiles) {
       const update = existingCandidate.pullRequest.updates.find(u => u.path === f)!;
-      update.updater = new CompositeUpdater(update.updater, new PythonFileWithVersion({version: newVersion}));
+      update.updater = new CompositeUpdater(wrapUpdater(update.updater) as any, wrapUpdater(new PythonFileWithVersion({version: newVersion})) as any) as any;
     }
 
     const dependencyNotes = this.getChangelogDepsNotes(pkg, normalizedUpdated);
@@ -404,7 +429,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // aggregate extra notes and append
     const extraNotes: string[] = [];
     for (let i = 1; i < candidates.length; i++) {
       for (const rd of candidates[i].pullRequest.body.releaseData) {
@@ -426,7 +450,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // If there are version entries in primary.releaseData, ensure pyproject extra-versions updaters exist
+    // Ensure pyproject extra-versions updater present when we have releaseData
     const normalizedUpdated = new Map<string, Version>();
     for (const rd of primary.pullRequest.body.releaseData) {
       if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
@@ -439,7 +463,9 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       });
       primary.pullRequest.updates = primary.pullRequest.updates.map(update => {
         if (update.path.endsWith('pyproject.toml')) {
-          update.updater = new CompositeUpdater(update.updater, new (PyProjectExtraVersionsUpdater as any)({extraVersions: extraToWrite}) as any);
+          const base = wrapUpdater(update.updater);
+          const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
+          update.updater = new CompositeUpdater(base as any, extraUpd as any) as any;
         }
         return update;
       });
@@ -474,7 +500,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
         } catch {
-          // ignore
+          // ignore parse errors
         }
       }
       const pkgKey = normalizePkgName(pkg.name);
@@ -487,10 +513,8 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   protected buildGraphOrder(graph: DependencyGraph<Package>, packageNamesToUpdate: string[]): Package[] {
     this.logger.info(`building graph order (forward traversal), packageNamesToUpdate: ${packageNamesToUpdate}`);
     const visited: Set<Package> = new Set();
-
     const normalizedNames = packageNamesToUpdate.map(n => normalizePkgName(n));
     for (const name of normalizedNames) this.visitForward(graph, name, visited, []);
-
     return Array.from(visited).sort((a, b) => this.packageNameFromPackage(a).localeCompare(this.packageNameFromPackage(b)));
   }
 
