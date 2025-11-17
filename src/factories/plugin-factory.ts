@@ -24,6 +24,7 @@ import {ManifestPlugin} from '../plugin';
 import {LinkedVersions} from '../plugins/linked-versions';
 import {CargoWorkspace} from '../plugins/cargo-workspace';
 import {NodeWorkspace} from '../plugins/node-workspace';
+import {PythonWorkspace} from '../plugins/python-workspace';
 import {VersioningStrategyType} from './versioning-strategy-factory';
 import {MavenWorkspace} from '../plugins/maven-workspace';
 import {ConfigurationError} from '../errors';
@@ -96,6 +97,19 @@ const pluginFactories: Record<string, PluginBuilder> = {
     ),
   'maven-workspace': options =>
     new MavenWorkspace(
+      options.github,
+      options.targetBranch,
+      options.repositoryConfig,
+      {
+        ...options,
+        ...(options.type as WorkspacePluginOptions),
+        merge:
+          (options.type as WorkspacePluginOptions).merge ??
+          !options.separatePullRequests,
+      }
+    ),
+  'python-workspace': options =>
+    new PythonWorkspace(
       options.github,
       options.targetBranch,
       options.repositoryConfig,
