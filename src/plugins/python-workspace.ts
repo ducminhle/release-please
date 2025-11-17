@@ -55,19 +55,11 @@ interface EnhancedPyProject extends PyProject {
 }
 
 function wrapUpdater(u: any): {updateContent(old?: string): string} {
-  if (!u) {
-    return {updateContent: (old?: string) => old || ''};
-  }
+  if (!u) return {updateContent: (old?: string) => old || ''};
   if (typeof u.updateContent === 'function') return u;
-  if (typeof u.update === 'function') {
-    return {updateContent: (old?: string) => u.update(old)};
-  }
-  if (typeof u.apply === 'function') {
-    return {updateContent: (old?: string) => u.apply(old)};
-  }
-  if (typeof u.transform === 'function') {
-    return {updateContent: (old?: string) => u.transform(old)};
-  }
+  if (typeof u.update === 'function') return {updateContent: (old?: string) => u.update(old)};
+  if (typeof u.apply === 'function') return {updateContent: (old?: string) => u.apply(old)};
+  if (typeof u.transform === 'function') return {updateContent: (old?: string) => u.transform(old)};
   return {
     updateContent: (old?: string) => {
       if (typeof u === 'string') return u;
@@ -85,8 +77,6 @@ class PyProjectExtraVersionsUpdater {
 
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
-
-    // If there's a declared section, merge into it
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
     if (headerRe.test(content)) {
       const start = content.search(headerRe);
@@ -94,7 +84,6 @@ class PyProjectExtraVersionsUpdater {
       const nextTableRe = /^\s*\[.+\]/m;
       const m = nextTableRe.exec(after.slice(1));
       const endIndex = m && m.index >= 0 ? start + 1 + m.index : content.length;
-
       const before = content.slice(0, start);
       const section = content.slice(start, endIndex);
       const afterSection = content.slice(endIndex);
@@ -120,7 +109,6 @@ class PyProjectExtraVersionsUpdater {
       return before + newSection + afterSection;
     }
 
-    // No existing section: append a new one at EOF
     const headerLine = '\n[tool.release-please.extra-versions]\n';
     const entryLines = Object.keys(this.extraVersions).sort().map(k => `${k} = "${this.extraVersions[k]}"`);
     return content + headerLine + entryLines.join('\n') + '\n';
@@ -153,7 +141,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
-    // discover all pyproject.toml files and cache contents
     try {
       const all = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
       for (const entry of all) {
@@ -164,7 +151,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           const f = await this.github.getFileContentsOnBranch(p, this.targetBranch);
           if (f && typeof f.parsedContent === 'string') this.pyprojectContents.set(p, f.parsedContent);
         } catch {
-          // ignore per-file read errors
+          // ignore
         }
       }
       this.logger.info(`found pyproject paths: ${Array.from(this.pyprojectPaths).join(', ')}`);
@@ -173,7 +160,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       this.logger.debug('findFilesByFilenameAndRef failed: ' + (e as Error).message);
     }
 
-    // also attempt repo-root pyproject.toml
     try {
       const root = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
       if (root && root.parsedContent !== undefined) {
@@ -184,7 +170,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       // ignore
     }
 
-    // build package list from repositoryConfig
     for (const path in this.repositoryConfig) {
       const cfg = this.repositoryConfig[path];
       if (cfg.releaseType !== 'python') continue;
@@ -215,7 +200,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRel, pyprojectContent);
         }
       } catch {
-        // ignore missing per-package pyproject
+        // ignore
       }
 
       try {
@@ -286,9 +271,9 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // build normalized -> canonical map
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
+
     this.logger.info(`normalizedToCanonical keys: ${Array.from(this.normalizedToCanonical.keys()).join(', ')}`);
 
     return {allPackages: packages, candidatesByPackage};
@@ -386,15 +371,9 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const dependencyNotes = this.getChangelogDepsNotes(pkg, normalizedUpdated);
 
     const updates: any[] = [];
-    if (pkg.setupCfg !== null) {
-      updates.push({path: addPath(pkg.path, 'setup.cfg'), createIfMissing: false, updater: new SetupCfg({version: newVersion})});
-    }
-    if (pkg.setupPy !== null) {
-      updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
-    }
-    if (pkg.pyproject !== null) {
-      updates.push({path: addPath(pkg.path, 'pyproject.toml'), createIfMissing: false, updater: new PyProjectToml({version: newVersion})});
-    }
+    if (pkg.setupCfg !== null) updates.push({path: addPath(pkg.path, 'setup.cfg'), createIfMissing: false, updater: new SetupCfg({version: newVersion})});
+    if (pkg.setupPy !== null) updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
+    if (pkg.pyproject !== null) updates.push({path: addPath(pkg.path, 'pyproject.toml'), createIfMissing: false, updater: new PyProjectToml({version: newVersion})});
 
     const versionPyFiles = await this.github.findFilesByFilenameAndRef('version.py', this.targetBranch, pkg.path);
     for (const vf of versionPyFiles) {
@@ -405,7 +384,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       await this.github.getFileContentsOnBranch(addPath(pkg.path, 'CHANGELOG.md'), this.targetBranch);
       updates.push({path: addPath(pkg.path, 'CHANGELOG.md'), createIfMissing: false, updater: new Changelog({version: newVersion, changelogEntry: dependencyNotes})});
     } catch {
-      // no changelog; skip
+      // no changelog
     }
 
     const canonical = this.normalizedToCanonical.get(normName) || pkg.name;
@@ -429,7 +408,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     const primary = candidates[0];
 
-    // merge metadata from other candidates into primary
     for (let i = 1; i < candidates.length; i++) {
       const c = candidates[i];
       for (const l of c.pullRequest.labels) {
@@ -452,7 +430,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // aggregate extra notes into changelogs
     const extraNotes: string[] = [];
     for (let i = 1; i < candidates.length; i++) {
       for (const rd of candidates[i].pullRequest.body.releaseData) {
@@ -474,7 +451,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // Build normalizedUpdated map
     const normalizedUpdated = new Map<string, Version>();
     for (const rd of primary.pullRequest.body.releaseData) {
       if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
@@ -485,7 +461,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       return [primary];
     }
 
-    // Build extraToWrite map keyed by canonical package names
     const extraToWrite: Record<string, string> = {};
     normalizedUpdated.forEach((v, k) => {
       const canonical = this.normalizedToCanonical.get(k) || k;
@@ -497,44 +472,82 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     const keysToWrite = Object.keys(extraToWrite);
 
+    // Build set of normalized package names we're updating (for dependency checks)
+    const normalizedTargets = new Set<string>();
+    keysToWrite.forEach(k => normalizedTargets.add(normalizePkgName(k)));
+
     for (const projPath of Array.from(this.pyprojectPaths)) {
       const content = this.pyprojectContents.get(projPath) || '';
-      this.logger.info(`Checking ${projPath} for keys: ${keysToWrite.join(', ')}`);
+      this.logger.info(`Checking ${projPath} for relevant package declarations or central section`);
       this.logger.debug(`Content head for ${projPath}:\n${content.split(/\n/).slice(0, 80).join('\n')}`);
 
+      let shouldAdd = false;
       const matchedKeys: string[] = [];
 
-      // Try: 1) detect explicit section and merge (handled by updater), 2) detect explicit key assignments anywhere
-      // We'll consider a project matched when ANY canonical key (normalized) appears in the file in a recognizable assignment form.
-      const lowerContent = content.toLowerCase();
+      // If file declares central section, always allow updates
+      const hasSection = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content);
+      if (hasSection) {
+        shouldAdd = true;
+        this.logger.info(`${projPath} declares [tool.release-please.extra-versions] section — will treat as central config`);
+      } else {
+        // try parsing pyproject to check project.name or dependencies
+        try {
+          const parsed = parsePyProject(content) as PyProject & any;
+          const projectName = (parsed.project && parsed.project.name) || (parsed.tool && parsed.tool.poetry && parsed.tool.poetry.name);
+          if (projectName) {
+            const normProjName = normalizePkgName(String(projectName));
+            if (normalizedTargets.has(normProjName)) {
+              shouldAdd = true;
+              matchedKeys.push(this.normalizedToCanonical.get(normProjName) || String(projectName));
+              this.logger.info(`${projPath} project.name matches target ${projectName}`);
+            }
+          }
 
-      for (const canonical of keysToWrite) {
-        const normCanonical = normalizePkgName(canonical);
-        // generate candidate name variants that commonly appear in pyproject keys:
-        const variants = new Set<string>();
-        variants.add(normCanonical); // e.g., testmoduleb
-        variants.add(normCanonical.replace(/-/g, '_')); // testmoduleb -> testmoduleb (idempotent) but safe
-        // also check with underscores collapsed or hyphens collapsed
-        variants.add(normCanonical.replace(/[-_]/g, '')); // testmoduleb => testmoduleb
-        // check original canonical as-is (case-preserved)
-        variants.add(canonical.toLowerCase());
-        // also check with possible package name prefix (no-op here but future-proof)
-        for (const v of Array.from(variants)) {
-          // match assignment like: key = "0.1.0" or key=0.1.0 or key = '0.1.0' optionally with trailing comment
-          const esc = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const re = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
-          if (re.test(lowerContent)) {
-            matchedKeys.push(canonical);
-            break;
+          // check poetry dependencies
+          if (!shouldAdd && parsed.tool && parsed.tool.poetry && parsed.tool.poetry.dependencies) {
+            for (const depName of Object.keys(parsed.tool.poetry.dependencies)) {
+              const normDep = normalizePkgName(String(depName));
+              if (normalizedTargets.has(normDep)) {
+                shouldAdd = true;
+                matchedKeys.push(this.normalizedToCanonical.get(normDep) || String(depName));
+                this.logger.info(`${projPath} tool.poetry.dependencies contains ${depName}`);
+                break;
+              }
+            }
+          }
+
+          // check PEP621 project.dependencies (array)
+          if (!shouldAdd && parsed.project && Array.isArray(parsed.project.dependencies)) {
+            for (const raw of parsed.project.dependencies) {
+              const depRaw = String(raw);
+              const depName = depRaw.split(/\s|>=|==|<=|<|>|\[/)[0];
+              const normDep = normalizePkgName(depName);
+              if (normalizedTargets.has(normDep)) {
+                shouldAdd = true;
+                matchedKeys.push(this.normalizedToCanonical.get(normDep) || depName);
+                this.logger.info(`${projPath} project.dependencies contains ${depName}`);
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          // parse errors: fall back to textual search for assignments
+          this.logger.debug(`parsePyProject failed for ${projPath}: ${(e as Error).message}`);
+          const lowerContent = content.toLowerCase();
+          for (const canonical of keysToWrite) {
+            const normCanonical = normalizePkgName(canonical);
+            const esc = normCanonical.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
+            if (re.test(lowerContent)) {
+              shouldAdd = true;
+              matchedKeys.push(canonical);
+            }
           }
         }
       }
 
-      // Also treat file as matched if it declares the section [tool.release-please.extra-versions]
-      const hasSection = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content);
-
-      if (matchedKeys.length === 0 && !hasSection) {
-        this.logger.info(`Skipping ${projPath} — matchedKeys: none; hasSection: ${hasSection}`);
+      if (!shouldAdd) {
+        this.logger.info(`Skipping ${projPath} — matchedKeys: ${matchedKeys.join(', ') || 'none'}; hasSection: ${hasSection}`);
         continue;
       }
 
@@ -559,10 +572,8 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
   protected async buildGraph(allPackages: Package[]): Promise<DependencyGraph<Package>> {
     const graph = new Map<string, DependencyNode<Package>>();
-
     this.normalizedToCanonical = new Map();
     for (const p of allPackages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
-
     for (const pkg of allPackages) {
       const deps: string[] = [];
       if (pkg.pyproject) {
@@ -589,7 +600,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       const pkgKey = normalizePkgName(pkg.name);
       graph.set(pkgKey, {deps, value: pkg});
     }
-
     return graph;
   }
 
@@ -628,7 +638,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
   protected getChangelogDepsNotes(pkg: Package, normalizedUpdated: Map<string, Version>): string {
     const depUpdates: string[] = [];
-
     try {
       if (pkg.pyproject) {
         const parsed = parsePyProject(pkg.pyproject) as PyProject & any;
