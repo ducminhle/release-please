@@ -191,6 +191,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         }
       }
       this.logger.info(`found pyproject paths: ${Array.from(this.pyprojectPaths).join(', ')}`);
+      this.logger.info(`pyprojectContents keys: ${Array.from(this.pyprojectContents.keys()).join(', ')}`);
     } catch (e) {
       this.logger.debug('scan pyproject.toml failed', (e as Error).message);
     }
@@ -516,37 +517,41 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
 
       const keysToWrite = Object.keys(extraToWrite);
+      if (keysToWrite.length === 0) {
+        this.logger.info('No keys to write; skipping extra-versions patching.');
+      } else {
+        this.logger.info(`keysToWrite: ${keysToWrite.join(', ')}`);
+      }
+
       for (const projPath of Array.from(this.pyprojectPaths)) {
         const content = this.pyprojectContents.get(projPath);
         let shouldAdd = false;
+        const matchedKeys: string[] = [];
 
         if (content) {
-          // Only consider files that explicitly declare the extra-versions table
-          if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
-            // Ensure this file already mentions at least one key we want to change; otherwise skip (conservative)
-            for (const k of keysToWrite) {
-              const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const keyRe = new RegExp('^\\s*' + esc + '\\s*=', 'm');
-              if (keyRe.test(content)) {
-                shouldAdd = true;
-                break;
-              }
-            }
-          } else {
-            // No explicit section: skip to avoid blind edits to unrelated module pyproject files
-            shouldAdd = false;
+          const lowerContent = content.toLowerCase();
+          for (const k of keysToWrite) {
+            const lowerK = k.toLowerCase();
+            const esc = lowerK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const keyRe = new RegExp('^\\s*' + esc + '\\s*=', 'm');
+            if (keyRe.test(lowerContent)) matchedKeys.push(k);
+          }
+          if (matchedKeys.length > 0) {
+            shouldAdd = true;
+          } else if (/^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content)) {
+            // file explicitly declares section; allow updating (central config)
+            shouldAdd = true;
           }
         } else {
-          // No cached content: skip to avoid blind updates
           this.logger.debug(`No cached content for ${projPath}; skipping.`);
-          shouldAdd = false;
         }
 
         if (!shouldAdd) {
-          this.logger.info(`Skipping ${projPath} (no matching extra-versions keys for this update).`);
+          this.logger.info(`Skipping ${projPath} — matchedKeys: ${matchedKeys.join(', ') || 'none'}`);
           continue;
         }
 
+        this.logger.info(`Will update ${projPath} (matchedKeys: ${matchedKeys.join(', ') || 'section-only'})`);
         const existing = primary.pullRequest.updates.find(u => u.path === projPath);
         const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
         if (existing) {
