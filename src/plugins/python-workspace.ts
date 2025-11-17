@@ -55,75 +55,64 @@ interface EnhancedPyProject extends PyProject {
 }
 
 /**
- * Updater that edits the [tool.release-please.extra-versions] table
- * inside a pyproject.toml file. It performs a best-effort textual edit:
- * - If the section exists, it replaces keys present in `extraVersions`.
- * - If the section does not exist, it creates it near the end of the file.
+ * Text-based updater that edits or creates the [tool.release-please.extra-versions]
+ * section inside a pyproject.toml file.
  *
- * This is intentionally simple (text-based) to avoid adding a TOML serializer
- * dependency; it handles common formatting styles.
+ * It exposes updateContent(old?: string): string to match updater contract.
  */
 class PyProjectExtraVersionsUpdater {
   private extraVersions: Record<string, string>;
   constructor(options: {extraVersions: Record<string, string>}) {
-    this.extraVersions = options.extraVersions || {};
+    this.extraVersions = options?.extraVersions || {};
   }
 
-  update(content: string): string {
-    if (!content) content = '';
+  updateContent(oldContent?: string): string {
+    let content = oldContent || '';
 
-    // Normalize keys for output: keep user-provided keys as-is.
-    const tableHeaderRegex = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
-    if (tableHeaderRegex.test(content)) {
-      // Section exists: replace or append keys inside that section.
-      // Find section range
-      const sectionStart = content.search(tableHeaderRegex);
-      if (sectionStart === -1) return this.appendNewSection(content);
+    const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
+    if (headerRe.test(content)) {
+      // Find section start
+      const start = content.search(headerRe);
+      if (start === -1) return this.appendNewSection(content);
 
-      // From sectionStart, find next table header (line starting with [)
-      const after = content.slice(sectionStart);
-      const nextTableRegex = /^\s*\[.+\]/m;
-      const m = nextTableRegex.exec(after.slice(1)); // skip the header line start
-      let sectionEndIndex: number;
+      // Find end of section (next top-level [section] or EOF)
+      const after = content.slice(start);
+      const nextTableRe = /^\s*\[.+\]/m;
+      const m = nextTableRe.exec(after.slice(1)); // skip header line first char
+      let endIndex: number;
       if (m && m.index >= 0) {
-        // m.index is relative to after.slice(1)
-        sectionEndIndex = sectionStart + 1 + m.index;
+        endIndex = start + 1 + m.index;
       } else {
-        sectionEndIndex = content.length;
+        endIndex = content.length;
       }
-      const before = content.slice(0, sectionStart);
-      const section = content.slice(sectionStart, sectionEndIndex);
-      const afterSection = content.slice(sectionEndIndex);
 
-      // Build map of existing entries in the section
+      const before = content.slice(0, start);
+      const section = content.slice(start, endIndex);
+      const afterSection = content.slice(endIndex);
+
+      // Parse existing entries
       const lines = section.split(/\r?\n/);
       const existing: Record<string, string> = {};
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
-        const eqIndex = line.indexOf('=');
-        if (eqIndex === -1) continue;
-        const key = line.slice(0, eqIndex).trim();
-        const valRaw = line.slice(eqIndex + 1).trim();
-        // remove surrounding quotes
+        const eq = line.indexOf('=');
+        if (eq === -1) continue;
+        const key = line.slice(0, eq).trim();
+        const valRaw = line.slice(eq + 1).trim();
         const val = valRaw.replace(/^['"]|['"]$/g, '');
         existing[key] = val;
       }
 
-      // Merge and produce new section lines
       const merged = {...existing};
-      for (const k of Object.keys(this.extraVersions)) {
-        merged[k] = this.extraVersions[k];
-      }
+      for (const k of Object.keys(this.extraVersions)) merged[k] = this.extraVersions[k];
 
-      // Reconstruct section: keep header, then entries sorted by key
       const headerLine = '[tool.release-please.extra-versions]';
       const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}"`);
       const newSection = [headerLine, ...entryLines].join('\n') + '\n';
 
       return before + newSection + afterSection;
     } else {
-      // Section not present: append at end (with newline)
       return this.appendNewSection(content);
     }
   }
@@ -131,8 +120,7 @@ class PyProjectExtraVersionsUpdater {
   private appendNewSection(content: string): string {
     const headerLine = '\n[tool.release-please.extra-versions]\n';
     const entryLines = Object.keys(this.extraVersions).sort().map(k => `${k} = "${this.extraVersions[k]}"`);
-    const section = headerLine + entryLines.join('\n') + '\n';
-    return content + section;
+    return content + headerLine + entryLines.join('\n') + '\n';
   }
 }
 
@@ -185,7 +173,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           pyprojectContent = f.parsedContent;
         }
       } catch {
-        // ignore
+        /* ignore */
       }
       try {
         if (!setupCfgContent) {
@@ -193,7 +181,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           setupCfgContent = f.parsedContent;
         }
       } catch {
-        // ignore
+        /* ignore */
       }
       try {
         if (!setupPyContent) {
@@ -201,7 +189,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           setupPyContent = f.parsedContent;
         }
       } catch {
-        // ignore
+        /* ignore */
       }
 
       let name = path;
@@ -238,14 +226,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         if (m) version = m[1];
       }
 
-      const pkg: Package = {
-        path,
-        name,
-        version,
-        setupCfg: setupCfgContent,
-        setupPy: setupPyContent,
-        pyproject: pyprojectContent,
-      };
+      const pkg: Package = {path, name, version, setupCfg: setupCfgContent, setupPy: setupPyContent, pyproject: pyprojectContent};
       packages.push(pkg);
 
       if (candidate) {
@@ -279,7 +260,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     pkg: Package,
     updatedVersions: VersionsMap
   ): CandidateReleasePullRequest {
-    // normalize updatedVersions
     const normalizedUpdated = new Map<string, Version>();
     updatedVersions.forEach((v, k) => normalizedUpdated.set(normalizePkgName(String(k)), v as Version));
 
@@ -293,16 +273,15 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       } else if (update.path === addPath(existingCandidate.path, 'setup.py')) {
         update.updater = new CompositeUpdater(update.updater, new SetupPy({version: newVersion}));
       } else if (update.path === addPath(existingCandidate.path, 'pyproject.toml')) {
-        // compose updater to also edit extra-versions if present in normalizedUpdated
+        // compose updater to also write extra-versions when applicable
         const extraToWrite: Record<string, string> = {};
-        for (const [norm, ver] of normalizedUpdated.entries()) {
-          // only include if this pyproject contains the mapping in normalizedToCanonical or if explicit extraVersions include it
-          if (this.normalizedToCanonical.has(norm) || this.extraVersions.has(norm)) {
-            extraToWrite[this.normalizedToCanonical.get(norm) || norm] = String(ver);
-          }
-        }
+        normalizedUpdated.forEach((v, k) => {
+          const canonical = this.normalizedToCanonical.get(k) || k;
+          extraToWrite[canonical] = String(v);
+        });
         if (Object.keys(extraToWrite).length > 0) {
-          update.updater = new CompositeUpdater(update.updater, new PyProjectToml({version: newVersion}), new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}) as any);
+          // CompositeUpdater accepts multiple updaters (implementation-specific); if not, adapt to your CompositeUpdater API.
+          update.updater = new CompositeUpdater(update.updater, new PyProjectToml({version: newVersion}), new (PyProjectExtraVersionsUpdater as any)({extraVersions: extraToWrite}) as any);
         } else {
           update.updater = new CompositeUpdater(update.updater, new PyProjectToml({version: newVersion}));
         }
@@ -310,7 +289,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       return update;
     });
 
-    // update version files like version.py / __init__.py
     const versionFiles = existingCandidate.pullRequest.updates
       .filter(u => u.path.endsWith('version.py') || u.path.endsWith('__init__.py'))
       .map(u => u.path);
@@ -364,7 +342,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
     }
     if (pkg.pyproject !== null) {
-      // default pyproject updater with version; extra-versions handled by separate updater if needed later in postProcessCandidates
       updates.push({path: addPath(pkg.path, 'pyproject.toml'), createIfMissing: false, updater: new PyProjectToml({version: newVersion})});
     }
 
@@ -373,12 +350,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       updates.push({path: addPath(pkg.path, vf), createIfMissing: false, updater: new PythonFileWithVersion({version: newVersion})});
     }
 
-    // add changelog updater if file exists
     try {
       await this.github.getFileContentsOnBranch(addPath(pkg.path, 'CHANGELOG.md'), this.targetBranch);
       updates.push({path: addPath(pkg.path, 'CHANGELOG.md'), createIfMissing: false, updater: new Changelog({version: newVersion, changelogEntry: dependencyNotes})});
     } catch {
-      // skip if no changelog
+      /* no changelog; skip */
     }
 
     const canonical = this.normalizedToCanonical.get(normName) || pkg.name;
@@ -400,18 +376,15 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   protected postProcessCandidates(candidates: CandidateReleasePullRequest[], _updatedVersions: VersionsMap): CandidateReleasePullRequest[] {
     if (candidates.length <= 1) return candidates;
 
-    // Aggregate into a single primary PR and return only it.
     const primary = candidates[0];
 
     for (let i = 1; i < candidates.length; i++) {
       const c = candidates[i];
 
-      // merge labels
       for (const l of c.pullRequest.labels) {
         if (!primary.pullRequest.labels.includes(l)) primary.pullRequest.labels.push(l);
       }
 
-      // merge updates by path; merge changelog entries when both present
       for (const u of c.pullRequest.updates) {
         const existing = primary.pullRequest.updates.find(x => x.path === u.path);
         if (!existing) {
@@ -421,19 +394,17 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         }
       }
 
-      // draft immutable update
       if (c.pullRequest.draft && !primary.pullRequest.draft) {
         primary.pullRequest = {...primary.pullRequest, draft: true};
       }
 
-      // merge releaseData (avoid duplicates)
       for (const rd of c.pullRequest.body.releaseData) {
         const exists = primary.pullRequest.body.releaseData.some(p => p.component === rd.component && String(p.version) === String(rd.version));
         if (!exists) primary.pullRequest.body.releaseData.push(rd);
       }
     }
 
-    // aggregate extra notes from other candidates into primary
+    // aggregate extra notes and append
     const extraNotes: string[] = [];
     for (let i = 1; i < candidates.length; i++) {
       for (const rd of candidates[i].pullRequest.body.releaseData) {
@@ -455,43 +426,25 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // Now also ensure pyproject extra-versions are updated if any updatedVersions are present
-    // Build normalizedUpdated map from primary.releaseData entries or _updatedVersions if available
+    // If there are version entries in primary.releaseData, ensure pyproject extra-versions updaters exist
     const normalizedUpdated = new Map<string, Version>();
-    // We do not have updatedVersions parameter here; attempt to collect from primary body.releaseData
     for (const rd of primary.pullRequest.body.releaseData) {
-      const comp = rd.component;
-      const v = rd.version;
-      if (comp && v) {
-        normalizedUpdated.set(normalizePkgName(String(comp)), v as Version);
-      }
+      if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
     }
-    // If normalizedUpdated has entries, attempt to add PyProjectExtraVersionsUpdater to any pyproject updates in primary
     if (normalizedUpdated.size > 0) {
       const extraToWrite: Record<string, string> = {};
       normalizedUpdated.forEach((v, k) => {
         const canonical = this.normalizedToCanonical.get(k) || k;
         extraToWrite[canonical] = String(v);
       });
-      // For each pyproject update, compose an extra-versions updater
       primary.pullRequest.updates = primary.pullRequest.updates.map(update => {
         if (update.path.endsWith('pyproject.toml')) {
-          update.updater = new CompositeUpdater(update.updater, new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}) as any);
+          update.updater = new CompositeUpdater(update.updater, new (PyProjectExtraVersionsUpdater as any)({extraVersions: extraToWrite}) as any);
         }
         return update;
       });
-      // Additionally: if primary has no pyproject update but repo root has pyproject.toml and we need to update it,
-      // we can add an update for root pyproject.toml if it exists on branch.
-      try {
-        // check root pyproject existence
-        // Note: GitHub methods are async; here we cannot await inside mapping. Do a best-effort synchronous check by pushing an updater later is complex.
-        // For safety, skip automatic addition of root pyproject updater to avoid unexpected file creation.
-      } catch {
-        // ignore
-      }
     }
 
-    // Return only aggregated primary
     return [primary];
   }
 
@@ -521,7 +474,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
         } catch {
-          // ignore parse errors
+          // ignore
         }
       }
       const pkgKey = normalizePkgName(pkg.name);
