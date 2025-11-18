@@ -77,13 +77,22 @@ class PyProjectExtraVersionsUpdater {
 
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
+
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
     if (headerRe.test(content)) {
       const start = content.search(headerRe);
+      if (start === -1) return this.appendNewSection(content);
+
       const after = content.slice(start);
       const nextTableRe = /^\s*\[.+\]/m;
       const m = nextTableRe.exec(after.slice(1));
-      const endIndex = m && m.index >= 0 ? start + 1 + m.index : content.length;
+      let endIndex: number;
+      if (m && m.index >= 0) {
+        endIndex = start + 1 + m.index;
+      } else {
+        endIndex = content.length;
+      }
+
       const before = content.slice(0, start);
       const section = content.slice(start, endIndex);
       const afterSection = content.slice(endIndex);
@@ -91,13 +100,14 @@ class PyProjectExtraVersionsUpdater {
       const lines = section.split(/\r?\n/);
       const existing: Record<string, string> = {};
       for (const line of lines) {
-        const t = line.trim();
-        if (!t || t.startsWith('#') || t.startsWith('[')) continue;
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
         const eq = line.indexOf('=');
         if (eq === -1) continue;
-        const k = line.slice(0, eq).trim();
+        const key = line.slice(0, eq).trim();
         const valRaw = line.slice(eq + 1).trim();
-        existing[k] = valRaw.replace(/^['"]|['"]$/g, '');
+        const val = valRaw.replace(/^['"]|['"]$/g, '');
+        existing[key] = val;
       }
 
       const merged = {...existing};
@@ -106,9 +116,14 @@ class PyProjectExtraVersionsUpdater {
       const headerLine = '[tool.release-please.extra-versions]';
       const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}"`);
       const newSection = [headerLine, ...entryLines].join('\n') + '\n';
-      return before + newSection + afterSection;
-    }
 
+      return before + newSection + afterSection;
+    } else {
+      return this.appendNewSection(content);
+    }
+  }
+
+  private appendNewSection(content: string): string {
     const headerLine = '\n[tool.release-please.extra-versions]\n';
     const entryLines = Object.keys(this.extraVersions).sort().map(k => `${k} = "${this.extraVersions[k]}"`);
     return content + headerLine + entryLines.join('\n') + '\n';
@@ -141,33 +156,37 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
+    // collect all pyproject.toml files in repo (under targetBranch)
     try {
-      const all = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
-      for (const entry of all) {
-        const p = typeof entry === 'string' ? entry : (entry as any).path;
-        if (!p) continue;
-        this.pyprojectPaths.add(p);
+      const allPyproj = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
+      for (const p of allPyproj) {
+        const pPath = typeof p === 'string' ? p : (p as any).path;
+        if (!pPath) continue;
+        this.pyprojectPaths.add(pPath);
         try {
-          const f = await this.github.getFileContentsOnBranch(p, this.targetBranch);
-          if (f && typeof f.parsedContent === 'string') this.pyprojectContents.set(p, f.parsedContent);
+          const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
+          if (f && typeof f.parsedContent === 'string') {
+            this.pyprojectContents.set(pPath, f.parsedContent);
+          }
         } catch {
-          // ignore
+          // ignore read errors for individual pyproject files
         }
       }
       this.logger.info(`found pyproject paths: ${Array.from(this.pyprojectPaths).join(', ')}`);
       this.logger.info(`pyprojectContents keys: ${Array.from(this.pyprojectContents.keys()).join(', ')}`);
     } catch (e) {
-      this.logger.debug('findFilesByFilenameAndRef failed: ' + (e as Error).message);
+      this.logger.debug('scan pyproject.toml failed', (e as Error).message);
     }
 
+    // Try to detect repo-root pyproject.toml once and add to pyprojectPaths if present
     try {
-      const root = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
-      if (root && root.parsedContent !== undefined) {
+      const rootProj = await this.github.getFileContentsOnBranch('pyproject.toml', this.targetBranch);
+      if (rootProj && rootProj.parsedContent !== undefined) {
         this.pyprojectPaths.add('pyproject.toml');
-        if (typeof root.parsedContent === 'string') this.pyprojectContents.set('pyproject.toml', root.parsedContent);
+        if (typeof rootProj.parsedContent === 'string') this.pyprojectContents.set('pyproject.toml', rootProj.parsedContent);
       }
     } catch {
-      // ignore
+      // no root pyproject
     }
 
     for (const path in this.repositoryConfig) {
@@ -175,50 +194,48 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       if (cfg.releaseType !== 'python') continue;
 
       const candidate = candidatesByPath.get(path);
-      const pyprojectRel = addPath(path, 'pyproject.toml');
 
       let setupCfgContent: string | null = null;
       let setupPyContent: string | null = null;
       let pyprojectContent: string | null = null;
+      const pyprojectRelPath = addPath(path, 'pyproject.toml');
 
       if (candidate) {
         const uCfg = candidate.pullRequest.updates.find(u => u.path === addPath(path, 'setup.cfg'));
         if (uCfg?.cachedFileContents) setupCfgContent = uCfg.cachedFileContents.parsedContent;
         const uPy = candidate.pullRequest.updates.find(u => u.path === addPath(path, 'setup.py'));
         if (uPy?.cachedFileContents) setupPyContent = uPy.cachedFileContents.parsedContent;
-        const uProj = candidate.pullRequest.updates.find(u => u.path === pyprojectRel);
+        const uProj = candidate.pullRequest.updates.find(u => u.path === pyprojectRelPath);
         if (uProj?.cachedFileContents) pyprojectContent = uProj.cachedFileContents.parsedContent;
       }
 
       try {
         if (!pyprojectContent) {
-          const f = await this.github.getFileContentsOnBranch(pyprojectRel, this.targetBranch);
+          const f = await this.github.getFileContentsOnBranch(pyprojectRelPath, this.targetBranch);
           pyprojectContent = f.parsedContent;
         }
         if (pyprojectContent !== null && pyprojectContent !== undefined) {
-          this.pyprojectPaths.add(pyprojectRel);
-          if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRel, pyprojectContent);
+          this.pyprojectPaths.add(pyprojectRelPath);
+          if (typeof pyprojectContent === 'string') this.pyprojectContents.set(pyprojectRelPath, pyprojectContent);
         }
       } catch {
-        // ignore
+        /* ignore missing per-package pyproject */
       }
-
       try {
         if (!setupCfgContent) {
           const f = await this.github.getFileContentsOnBranch(addPath(path, 'setup.cfg'), this.targetBranch);
           setupCfgContent = f.parsedContent;
         }
       } catch {
-        // ignore
+        /* ignore */
       }
-
       try {
         if (!setupPyContent) {
           const f = await this.github.getFileContentsOnBranch(addPath(path, 'setup.py'), this.targetBranch);
           setupPyContent = f.parsedContent;
         }
       } catch {
-        // ignore
+        /* ignore */
       }
 
       let name = path;
@@ -236,7 +253,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
         } catch {
-          this.logger.debug(`parsePyProject failed for ${path}`);
+          this.logger.debug(`Failed to parse pyproject.toml for ${path}`);
         }
       }
 
@@ -271,6 +288,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
+    // build normalized -> canonical map
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
 
@@ -282,7 +300,9 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   protected bumpVersion(pkg: Package): Version {
     const norm = normalizePkgName(pkg.name);
     const extra = this.extraVersions.get(norm);
-    if (extra) return Version.parse(extra);
+    if (extra) {
+      return Version.parse(extra);
+    }
     if (!pkg.version) {
       this.logger.info(`No static version for ${pkg.name}; falling back to 0.1.0`);
       return Version.parse('0.1.0');
@@ -371,9 +391,15 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const dependencyNotes = this.getChangelogDepsNotes(pkg, normalizedUpdated);
 
     const updates: any[] = [];
-    if (pkg.setupCfg !== null) updates.push({path: addPath(pkg.path, 'setup.cfg'), createIfMissing: false, updater: new SetupCfg({version: newVersion})});
-    if (pkg.setupPy !== null) updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
-    if (pkg.pyproject !== null) updates.push({path: addPath(pkg.path, 'pyproject.toml'), createIfMissing: false, updater: new PyProjectToml({version: newVersion})});
+    if (pkg.setupCfg !== null) {
+      updates.push({path: addPath(pkg.path, 'setup.cfg'), createIfMissing: false, updater: new SetupCfg({version: newVersion})});
+    }
+    if (pkg.setupPy !== null) {
+      updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
+    }
+    if (pkg.pyproject !== null) {
+      updates.push({path: addPath(pkg.path, 'pyproject.toml'), createIfMissing: false, updater: new PyProjectToml({version: newVersion})});
+    }
 
     const versionPyFiles = await this.github.findFilesByFilenameAndRef('version.py', this.targetBranch, pkg.path);
     for (const vf of versionPyFiles) {
@@ -384,7 +410,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       await this.github.getFileContentsOnBranch(addPath(pkg.path, 'CHANGELOG.md'), this.targetBranch);
       updates.push({path: addPath(pkg.path, 'CHANGELOG.md'), createIfMissing: false, updater: new Changelog({version: newVersion, changelogEntry: dependencyNotes})});
     } catch {
-      // no changelog
+      /* no changelog; skip */
     }
 
     const canonical = this.normalizedToCanonical.get(normName) || pkg.name;
@@ -410,9 +436,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     for (let i = 1; i < candidates.length; i++) {
       const c = candidates[i];
+
       for (const l of c.pullRequest.labels) {
         if (!primary.pullRequest.labels.includes(l)) primary.pullRequest.labels.push(l);
       }
+
       for (const u of c.pullRequest.updates) {
         const existing = primary.pullRequest.updates.find(x => x.path === u.path);
         if (!existing) {
@@ -421,9 +449,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           existing.updater.changelogEntry = appendDependenciesSectionToChangelog(existing.updater.changelogEntry, u.updater.changelogEntry, this.logger);
         }
       }
+
       if (c.pullRequest.draft && !primary.pullRequest.draft) {
         primary.pullRequest = {...primary.pullRequest, draft: true};
       }
+
       for (const rd of c.pullRequest.body.releaseData) {
         const exists = primary.pullRequest.body.releaseData.some(p => p.component === rd.component && String(p.version) === String(rd.version));
         if (!exists) primary.pullRequest.body.releaseData.push(rd);
@@ -471,8 +501,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
 
     const keysToWrite = Object.keys(extraToWrite);
-
-    // Build set of normalized package names we're updating (for dependency checks)
     const normalizedTargets = new Set<string>();
     keysToWrite.forEach(k => normalizedTargets.add(normalizePkgName(k)));
 
@@ -484,13 +512,23 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       let shouldAdd = false;
       const matchedKeys: string[] = [];
 
-      // If file declares central section, always allow updates
-      const hasSection = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m.test(content);
+      // robust header detection accepting common variants
+      const headerVariants = [
+        'tool.release-please.extra-versions',
+        'tool.release_please.extra-versions',
+        'tool.release-please.extra_versions',
+        'tool.release-extras-versions',
+        'tool.release_extras_versions',
+        'tool.releaseplease.extra-versions',
+      ];
+      const headerRegex = new RegExp('^\\s*\\[\\s*(?:' + headerVariants.map(h => h.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')).join('|') + ')\\s*\\]\\s*$', 'mi');
+
+      const hasSection = headerRegex.test(content);
+
       if (hasSection) {
         shouldAdd = true;
-        this.logger.info(`${projPath} declares [tool.release-please.extra-versions] section — will treat as central config`);
+        this.logger.info(`${projPath} declares [tool.release-please.extra-versions] (or variant) — will treat as central config`);
       } else {
-        // try parsing pyproject to check project.name or dependencies
         try {
           const parsed = parsePyProject(content) as PyProject & any;
           const projectName = (parsed.project && parsed.project.name) || (parsed.tool && parsed.tool.poetry && parsed.tool.poetry.name);
@@ -503,7 +541,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
 
-          // check poetry dependencies
           if (!shouldAdd && parsed.tool && parsed.tool.poetry && parsed.tool.poetry.dependencies) {
             for (const depName of Object.keys(parsed.tool.poetry.dependencies)) {
               const normDep = normalizePkgName(String(depName));
@@ -516,7 +553,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
 
-          // check PEP621 project.dependencies (array)
           if (!shouldAdd && parsed.project && Array.isArray(parsed.project.dependencies)) {
             for (const raw of parsed.project.dependencies) {
               const depRaw = String(raw);
@@ -531,7 +567,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             }
           }
         } catch (e) {
-          // parse errors: fall back to textual search for assignments
           this.logger.debug(`parsePyProject failed for ${projPath}: ${(e as Error).message}`);
           const lowerContent = content.toLowerCase();
           for (const canonical of keysToWrite) {
@@ -572,8 +607,10 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
   protected async buildGraph(allPackages: Package[]): Promise<DependencyGraph<Package>> {
     const graph = new Map<string, DependencyNode<Package>>();
+
     this.normalizedToCanonical = new Map();
     for (const p of allPackages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
+
     for (const pkg of allPackages) {
       const deps: string[] = [];
       if (pkg.pyproject) {
@@ -600,6 +637,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       const pkgKey = normalizePkgName(pkg.name);
       graph.set(pkgKey, {deps, value: pkg});
     }
+
     return graph;
   }
 
@@ -638,6 +676,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
   protected getChangelogDepsNotes(pkg: Package, normalizedUpdated: Map<string, Version>): string {
     const depUpdates: string[] = [];
+
     try {
       if (pkg.pyproject) {
         const parsed = parsePyProject(pkg.pyproject) as PyProject & any;
