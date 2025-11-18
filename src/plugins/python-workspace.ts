@@ -438,84 +438,78 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     return {path: pkg.path, pullRequest, config: {releaseType: 'python'}};
   }
 
-  protected postProcessCandidates(candidates: CandidateReleasePullRequest[], _updatedVersions: VersionsMap): CandidateReleasePullRequest[] {
+  protected postProcessCandidates(candidates: CandidateReleasePullRequest[], updatedVersions: VersionsMap): CandidateReleasePullRequest[] {
     if (candidates.length <= 1) return candidates;
 
     const primary = candidates[0];
 
     for (let i = 1; i < candidates.length; i++) {
-      const c = candidates[i];
-
-      for (const l of c.pullRequest.labels) {
-        if (!primary.pullRequest.labels.includes(l)) primary.pullRequest.labels.push(l);
-      }
-
-      for (const u of c.pullRequest.updates) {
-        const existing = primary.pullRequest.updates.find(x => x.path === u.path);
-        if (!existing) {
-          primary.pullRequest.updates.push(u);
-        } else if (existing.updater instanceof Changelog && u.updater instanceof Changelog) {
-          existing.updater.changelogEntry = appendDependenciesSectionToChangelog(existing.updater.changelogEntry, u.updater.changelogEntry, this.logger);
+        const c = candidates[i];
+        for (const l of c.pullRequest.labels) {
+            if (!primary.pullRequest.labels.includes(l)) primary.pullRequest.labels.push(l);
         }
-      }
 
-      if (c.pullRequest.draft && !primary.pullRequest.draft) {
-        primary.pullRequest = {...primary.pullRequest, draft: true};
-      }
-
-      for (const rd of c.pullRequest.body.releaseData) {
-        const exists = primary.pullRequest.body.releaseData.some(p => p.component === rd.component && String(p.version) === String(rd.version));
-        if (!exists) primary.pullRequest.body.releaseData.push(rd);
-      }
-    }
-
-    const extraNotes: string[] = [];
-    for (let i = 1; i < candidates.length; i++) {
-      for (const rd of candidates[i].pullRequest.body.releaseData) {
-        if (rd?.notes) extraNotes.push(rd.notes);
-      }
-    }
-    if (extraNotes.length > 0) {
-      const combined = extraNotes.join('\n\n');
-      primary.pullRequest.updates = primary.pullRequest.updates.map(update => {
-        if (update.updater instanceof Changelog) {
-          update.updater.changelogEntry = appendDependenciesSectionToChangelog(update.updater.changelogEntry, combined, this.logger);
+        for (const u of c.pullRequest.updates) {
+            const existing = primary.pullRequest.updates.find(x => x.path === u.path);
+            if (!existing) {
+                primary.pullRequest.updates.push(u);
+            } else if (existing.updater instanceof Changelog && u.updater instanceof Changelog) {
+                existing.updater.changelogEntry = appendDependenciesSectionToChangelog(existing.updater.changelogEntry, u.updater.changelogEntry, this.logger);
+            }
         }
-        return update;
-      });
-      if (primary.pullRequest.body.releaseData.length > 0) {
-        primary.pullRequest.body.releaseData[0].notes = appendDependenciesSectionToChangelog(primary.pullRequest.body.releaseData[0].notes, combined, this.logger);
-      } else {
-        primary.pullRequest.body.releaseData.push({component: primary.path, version: primary.pullRequest.version, notes: appendDependenciesSectionToChangelog('', combined, this.logger)});
-      }
+
+        if (c.pullRequest.draft && !primary.pullRequest.draft) {
+            primary.pullRequest = {...primary.pullRequest, draft: true};
+        }
+
+        for (const rd of c.pullRequest.body.releaseData) {
+            const exists = primary.pullRequest.body.releaseData.some(p => p.component === rd.component && String(p.version) === String(rd.version));
+            if (!exists) primary.pullRequest.body.releaseData.push(rd);
+        }
     }
 
     const normalizedUpdated = new Map<string, Version>();
     for (const rd of primary.pullRequest.body.releaseData) {
-      if (rd.component && rd.version) normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
+        if (rd.component && rd.version) {
+            normalizedUpdated.set(normalizePkgName(String(rd.component)), rd.version as Version);
+        }
     }
 
     if (normalizedUpdated.size === 0) {
-      this.logger.info('normalizedUpdated is empty; no extra-versions to write.');
-      return [primary];
+        this.logger.info('normalizedUpdated is empty; no extra-versions to write.');
+        return [primary];
     }
 
     const extraToWrite: Record<string, string> = {};
     normalizedUpdated.forEach((v, k) => {
-      const canonical = this.normalizedToCanonical.get(k) || k;
-      extraToWrite[canonical] = String(v);
+        const canonical = this.normalizedToCanonical.get(k) || k;
+        extraToWrite[canonical] = String(v);
     });
 
-    const pyhelloworldPath = 'pyhelloworld/pyproject.toml'; // Assuming this is the correct path
-    const content = this.pyprojectContents.get(pyhelloworldPath) || '';
+    let pyhelloworldPath = '';
+    for (const pyprojectPath of this.pyprojectPaths) {
+        const content = this.pyprojectContents.get(pyprojectPath);
+        if (content && content.includes('[project]\nname = "pyhelloworld"')) {
+            pyhelloworldPath = pyprojectPath;
+            break;
+        }
+    }
 
-    const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
-
-    primary.pullRequest.updates.push({
-      path: pyhelloworldPath,
-      createIfMissing: false,
-      updater: extraUpd,
-    });
+    if (pyhelloworldPath) {
+        const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
+        const existing = primary.pullRequest.updates.find(u => u.path === pyhelloworldPath);
+        if (existing) {
+            existing.updater = new CompositeUpdater(existing.updater, extraUpd);
+        } else {
+            primary.pullRequest.updates.push({
+                path: pyhelloworldPath,
+                createIfMissing: false,
+                updater: extraUpd,
+            });
+        }
+    } else {
+        this.logger.warn('pyhelloworld module not found');
+    }
 
     return [primary];
   }
