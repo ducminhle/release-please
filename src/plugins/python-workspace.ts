@@ -462,77 +462,82 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   ): CandidateReleasePullRequest[] {
     if (candidates.length === 0) return candidates;
 
+    this.logger.info(`postProcessCandidates: processing ${candidates.length} candidates`);
+    this.logger.info(`updatedVersions has ${updatedVersions.size} entries`);
+
     // Group updates by the pyproject.toml file where extra-versions should be updated
     const extraVersionUpdatesByFile = new Map<string, Record<string, string>>();
 
-    for (const candidate of candidates) {
-      const pkgPath = candidate.path;
-      // Find the package name from the candidate
-      let pkgName: string | undefined;
+    // Iterate through all updated versions to find which need extra-version updates
+    for (const [pkgKey, version] of updatedVersions.entries()) {
+      const pkgName = String(pkgKey);
+      const normalized = normalizePkgName(pkgName);
       
-      for (const [name, cand] of Object.entries(candidate)) {
-        if (cand === candidate) {
-          pkgName = name;
-          break;
-        }
-      }
-
-      // Try to extract package name from the candidate's release data
-      if (!pkgName && candidate.pullRequest.body.releaseData.length > 0) {
-        pkgName = candidate.pullRequest.body.releaseData[0].component;
-      }
-
-      if (pkgName) {
-        const normalized = normalizePkgName(pkgName);
-        const version = updatedVersions.get(normalized) || updatedVersions.get(pkgName);
+      this.logger.debug(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
+      
+      // Check if this package's version is defined in an extra-versions section somewhere
+      const definedIn = this.extraVersionsDefinedIn.get(normalized);
+      
+      if (definedIn) {
+        this.logger.info(`Package ${pkgName} extra-version should be updated in ${definedIn}`);
         
-        if (version) {
-          // Check if this package's version is defined in an extra-versions section
-          const definedIn = this.extraVersionsDefinedIn.get(normalized);
-          
-          if (definedIn) {
-            this.logger.info(`Package ${pkgName} extra-version should be updated in ${definedIn}`);
-            
-            if (!extraVersionUpdatesByFile.has(definedIn)) {
-              extraVersionUpdatesByFile.set(definedIn, {});
-            }
-            
-            const canonical = this.normalizedToCanonical.get(normalized) || pkgName;
-            extraVersionUpdatesByFile.get(definedIn)![canonical] = String(version);
-          }
+        if (!extraVersionUpdatesByFile.has(definedIn)) {
+          extraVersionUpdatesByFile.set(definedIn, {});
         }
+        
+        const canonical = this.normalizedToCanonical.get(normalized) || pkgName;
+        extraVersionUpdatesByFile.get(definedIn)![canonical] = String(version);
+      } else {
+        this.logger.debug(`Package ${pkgName} is not defined in any extra-versions section`);
       }
     }
 
+    this.logger.info(`Found ${extraVersionUpdatesByFile.size} files that need extra-version updates`);
+
     // Apply extra-version updates to the appropriate pyproject.toml files
     for (const [pyprojectPath, extraVersions] of extraVersionUpdatesByFile.entries()) {
-      this.logger.info(`Updating extra-versions in ${pyprojectPath}: ${JSON.stringify(extraVersions)}`);
+      this.logger.info(`Will update extra-versions in ${pyprojectPath}: ${JSON.stringify(extraVersions)}`);
       
       // Find which candidate should contain this update
-      // The pyproject.toml might belong to one of the candidates, or be a parent file
       let targetCandidate: CandidateReleasePullRequest | undefined;
       
+      // First, check if any candidate's path matches the pyproject.toml location
       for (const candidate of candidates) {
         const candidatePyprojectPath = addPath(candidate.path, 'pyproject.toml');
         if (pyprojectPath === candidatePyprojectPath) {
           targetCandidate = candidate;
+          this.logger.info(`Found matching candidate for ${pyprojectPath} at path ${candidate.path}`);
           break;
         }
       }
 
-      // If the pyproject.toml is not in any candidate's path, add it to the first candidate
+      // If the pyproject.toml is in a parent directory or different location,
+      // check if any candidate's path is a subdirectory of the pyproject.toml's directory
+      if (!targetCandidate) {
+        const pyprojectDir = pyprojectPath.replace(/\/pyproject\.toml$/, '');
+        for (const candidate of candidates) {
+          if (candidate.path.startsWith(pyprojectDir + '/') || candidate.path === pyprojectDir) {
+            targetCandidate = candidate;
+            this.logger.info(`Found candidate under ${pyprojectPath} directory: ${candidate.path}`);
+            break;
+          }
+        }
+      }
+
+      // If still not found, use the first candidate (this handles root pyproject.toml case)
       if (!targetCandidate) {
         targetCandidate = candidates[0];
+        this.logger.info(`Using first candidate for ${pyprojectPath}`);
       }
 
       const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
       const existing = targetCandidate.pullRequest.updates.find(u => u.path === pyprojectPath);
       
       if (existing) {
-        // Composite with existing updater
+        this.logger.info(`Compositing extra-versions updater with existing updater for ${pyprojectPath}`);
         existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
       } else {
-        // Add new update for extra-versions only
+        this.logger.info(`Adding new extra-versions updater for ${pyprojectPath}`);
         targetCandidate.pullRequest.updates.push({
           path: pyprojectPath,
           createIfMissing: false,
