@@ -506,103 +506,23 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       extraToWrite[canonical] = String(v);
     });
 
-    this.logger.info(`extraToWrite keys: ${Object.keys(extraToWrite).join(', ')}`);
-    this.logger.info(`pyprojectPaths discovered: ${Array.from(this.pyprojectPaths).join(', ')}`);
+    const pyhelloworldPath = 'pyhelloworld/pyproject.toml'; // Assuming this is the correct path
+    const content = this.pyprojectContents.get(pyhelloworldPath) || '';
 
-    const keysToWrite = Object.keys(extraToWrite);
-    const normalizedTargets = new Set<string>();
-    keysToWrite.forEach(k => normalizedTargets.add(normalizePkgName(k)));
+    this.logger.info(`Update pyhelloworld module pyproject.toml file with dependencies`);
 
-    for (const projPath of Array.from(this.pyprojectPaths)) {
-      const content = this.pyprojectContents.get(projPath) || '';
-      this.logger.info(`Checking ${projPath} for relevant package declarations or central section`);
-      this.logger.debug(`Content head for ${projPath}:\n${content.split(/\n/).slice(0, 80).join('\n')}`);
-
-      let shouldAdd = false;
-      const matchedKeys: string[] = [];
-
-      // Simple, robust detection of central section by lowercased substring checks.
-      const lc = content.toLowerCase();
-      const hasCanonicalSection = lc.indexOf('[tool.release-please.extra-versions]') !== -1;
-      const hasCommonVariant1 = lc.indexOf('[tool.release-extras-versions]') !== -1;
-      const hasCommonVariant2 = lc.indexOf('[tool.release_extras_versions]') !== -1;
-      const hasSection = hasCanonicalSection || hasCommonVariant1 || hasCommonVariant2;
-
-      if (hasSection) {
-        shouldAdd = true;
-        this.logger.info(`${projPath} declares [tool.release-please.extra-versions] (or variant) — will treat as central config`);
-      } else {
-        try {
-          const parsed = parsePyProject(content) as PyProject & any;
-          const projectName = (parsed.project && parsed.project.name) || (parsed.tool && parsed.tool.poetry && parsed.tool.poetry.name);
-          if (projectName) {
-            const normProjName = normalizePkgName(String(projectName));
-            if (normalizedTargets.has(normProjName)) {
-              shouldAdd = true;
-              matchedKeys.push(this.normalizedToCanonical.get(normProjName) || String(projectName));
-              this.logger.info(`${projPath} project.name matches target ${projectName}`);
-            }
-          }
-
-          if (!shouldAdd && parsed.tool && parsed.tool.poetry && parsed.tool.poetry.dependencies) {
-            for (const depName of Object.keys(parsed.tool.poetry.dependencies)) {
-              const normDep = normalizePkgName(String(depName));
-              if (normalizedTargets.has(normDep)) {
-                shouldAdd = true;
-                matchedKeys.push(this.normalizedToCanonical.get(normDep) || String(depName));
-                this.logger.info(`${projPath} tool.poetry.dependencies contains ${depName}`);
-                break;
-              }
-            }
-          }
-
-          if (!shouldAdd && parsed.project && Array.isArray(parsed.project.dependencies)) {
-            for (const raw of parsed.project.dependencies) {
-              const depRaw = String(raw);
-              const depName = depRaw.split(/\s|>=|==|<=|<|>|\[/)[0];
-              const normDep = normalizePkgName(depName);
-              if (normalizedTargets.has(normDep)) {
-                shouldAdd = true;
-                matchedKeys.push(this.normalizedToCanonical.get(normDep) || depName);
-                this.logger.info(`${projPath} project.dependencies contains ${depName}`);
-                break;
-              }
-            }
-          }
-        } catch (e) {
-          this.logger.debug(`parsePyProject failed for ${projPath}: ${(e as Error).message}`);
-          const lowerContent = content.toLowerCase();
-          for (const canonical of keysToWrite) {
-            const normCanonical = normalizePkgName(canonical);
-            const esc = normCanonical.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp('^\\s*' + esc + '\\s*=\\s*["\\\']?[0-9A-Za-z_.+\\-]+["\\\']?(\\s*#.*)?', 'm');
-            if (re.test(lowerContent)) {
-              shouldAdd = true;
-              matchedKeys.push(canonical);
-            }
-          }
-        }
-      }
-
-      if (!shouldAdd) {
-        this.logger.info(`Skipping ${projPath} — matchedKeys: ${matchedKeys.join(', ') || 'none'}; hasSection: ${hasSection}`);
-        continue;
-      }
-
-      this.logger.info(`Will update ${projPath} (matchedKeys: ${matchedKeys.length > 0 ? matchedKeys.join(', ') : 'section-only'})`);
-      const existing = primary.pullRequest.updates.find(u => u.path === projPath);
-      const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
-      if (existing) {
-        existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
-        this.logger.info(`Composed extra-versions updater into existing updater for ${projPath}`);
-      } else {
-        primary.pullRequest.updates.push({
-          path: projPath,
-          createIfMissing: false,
-          updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
-        } as any);
-        this.logger.info(`Added pyproject extra-versions updater for ${projPath}`);
-      }
+    const existing = primary.pullRequest.updates.find(u => u.path === pyhelloworldPath);
+    const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
+    if (existing) {
+      existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
+      this.logger.info(`Composed extra-versions updater into existing updater for ${pyhelloworldPath}`);
+    } else {
+      primary.pullRequest.updates.push({
+        path: pyhelloworldPath,
+        createIfMissing: false,
+        updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
+      } as any);
+      this.logger.info(`Added pyproject extra-versions updater for ${pyhelloworldPath}`);
     }
 
     return [primary];
