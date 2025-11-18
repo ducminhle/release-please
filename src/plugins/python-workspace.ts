@@ -509,21 +509,13 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const pyhelloworldPath = 'pyhelloworld/pyproject.toml'; // Assuming this is the correct path
     const content = this.pyprojectContents.get(pyhelloworldPath) || '';
 
-    this.logger.info(`Update pyhelloworld module pyproject.toml file with dependencies`);
-
-    const existing = primary.pullRequest.updates.find(u => u.path === pyhelloworldPath);
     const extraUpd = wrapUpdater(new PyProjectExtraVersionsUpdater({extraVersions: extraToWrite}));
-    if (existing) {
-      existing.updater = new CompositeUpdater(wrapUpdater(existing.updater) as any, extraUpd as any) as any;
-      this.logger.info(`Composed extra-versions updater into existing updater for ${pyhelloworldPath}`);
-    } else {
-      primary.pullRequest.updates.push({
-        path: pyhelloworldPath,
-        createIfMissing: false,
-        updater: new CompositeUpdater(extraUpd as any, extraUpd as any) as any,
-      } as any);
-      this.logger.info(`Added pyproject extra-versions updater for ${pyhelloworldPath}`);
-    }
+
+    primary.pullRequest.updates.push({
+      path: pyhelloworldPath,
+      createIfMissing: false,
+      updater: extraUpd,
+    });
 
     return [primary];
   }
