@@ -55,11 +55,19 @@ interface EnhancedPyProject extends PyProject {
 }
 
 function wrapUpdater(u: any): {updateContent(old?: string): string} {
-  if (!u) return {updateContent: (old?: string) => old || ''};
+  if (!u) {
+    return {updateContent: (old?: string) => old || ''};
+  }
   if (typeof u.updateContent === 'function') return u;
-  if (typeof u.update === 'function') return {updateContent: (old?: string) => u.update(old)};
-  if (typeof u.apply === 'function') return {updateContent: (old?: string) => u.apply(old)};
-  if (typeof u.transform === 'function') return {updateContent: (old?: string) => u.transform(old)};
+  if (typeof u.update === 'function') {
+    return {updateContent: (old?: string) => u.update(old)};
+  }
+  if (typeof u.apply === 'function') {
+    return {updateContent: (old?: string) => u.apply(old)};
+  }
+  if (typeof u.transform === 'function') {
+    return {updateContent: (old?: string) => u.transform(old)};
+  }
   return {
     updateContent: (old?: string) => {
       if (typeof u === 'string') return u;
@@ -78,6 +86,7 @@ class PyProjectExtraVersionsUpdater {
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
 
+    // detect canonical section exactly (safe) and merge
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
     if (headerRe.test(content)) {
       const start = content.search(headerRe);
@@ -512,18 +521,12 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       let shouldAdd = false;
       const matchedKeys: string[] = [];
 
-      // robust header detection accepting common variants
-      const headerVariants = [
-        'tool.release-please.extra-versions',
-        'tool.release_please.extra-versions',
-        'tool.release-please.extra_versions',
-        'tool.release-extras-versions',
-        'tool.release_extras_versions',
-        'tool.releaseplease.extra-versions',
-      ];
-      const headerRegex = new RegExp('^\\s*\\[\\s*(?:' + headerVariants.map(h => h.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')).join('|') + ')\\s*\\]\\s*$', 'mi');
-
-      const hasSection = headerRegex.test(content);
+      // Simple, robust detection of central section by lowercased substring checks.
+      const lc = content.toLowerCase();
+      const hasCanonicalSection = lc.indexOf('[tool.release-please.extra-versions]') !== -1;
+      const hasCommonVariant1 = lc.indexOf('[tool.release-extras-versions]') !== -1;
+      const hasCommonVariant2 = lc.indexOf('[tool.release_extras_versions]') !== -1;
+      const hasSection = hasCanonicalSection || hasCommonVariant1 || hasCommonVariant2;
 
       if (hasSection) {
         shouldAdd = true;
