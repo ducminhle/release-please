@@ -178,21 +178,35 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         try {
           const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
           if (f && typeof f.parsedContent === 'string') {
-            this.logger.debug(`Parsing ${pPath} for extra-versions...`);
-            const parsed = parsePyProject(f.parsedContent) as EnhancedPyProject;
-            if (parsed.tool?.releasePlease?.extraVersions) {
-              this.logger.info(`Found extra-versions section in ${pPath}`);
-              // Record where each package's extra-version is defined
-              for (const [pkgName, pkgVer] of Object.entries(parsed.tool.releasePlease.extraVersions)) {
-                const normalized = normalizePkgName(pkgName);
-                this.extraVersions.set(normalized, String(pkgVer));
-                this.extraVersionsDefinedIn.set(normalized, pPath);
-                this.logger.info(`  ${pkgName} (normalized: ${normalized}) -> ${pPath}`);
+            this.logger.info(`Parsing ${pPath} for extra-versions...`);
+            try {
+              const parsed = parsePyProject(f.parsedContent) as EnhancedPyProject;
+              this.logger.info(`Parsed structure for ${pPath}:`, JSON.stringify({
+                hasProject: !!parsed.project,
+                hasTool: !!parsed.tool,
+                hasToolReleasePlease: !!parsed.tool?.releasePlease,
+                hasExtraVersions: !!parsed.tool?.releasePlease?.extraVersions,
+                toolKeys: parsed.tool ? Object.keys(parsed.tool) : []
+              }));
+              
+              if (parsed.tool?.releasePlease?.extraVersions) {
+                this.logger.info(`Found extra-versions section in ${pPath}`);
+                // Record where each package's extra-version is defined
+                for (const [pkgName, pkgVer] of Object.entries(parsed.tool.releasePlease.extraVersions)) {
+                  const normalized = normalizePkgName(pkgName);
+                  this.extraVersions.set(normalized, String(pkgVer));
+                  this.extraVersionsDefinedIn.set(normalized, pPath);
+                  this.logger.info(`  ${pkgName} (normalized: ${normalized}) -> ${pPath}`);
+                }
+              } else {
+                this.logger.info(`No extra-versions found in ${pPath}`);
               }
+            } catch (parseErr) {
+              this.logger.error(`Failed to parse ${pPath}:`, (parseErr as Error).message);
             }
           }
         } catch (err) {
-          this.logger.debug(`Failed to read ${pPath}: ${(err as Error).message}`);
+          this.logger.error(`Failed to read ${pPath}: ${(err as Error).message}`);
         }
       }
     } catch (e) {
@@ -267,7 +281,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           if (project?.version) version = project.version;
           // DO NOT re-read extra-versions here - we already have them from the scan above
         } catch {
-          this.logger.debug(`Failed to parse pyproject.toml for ${path}`);
+          this.logger.info(`Failed to parse pyproject.toml for ${path}`);
         }
       }
 
@@ -298,7 +312,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
       if (candidate) {
         candidatesByPackage[normalizePkgName(pkg.name)] = candidate;
-        this.logger.debug(`associated candidate for ${pkg.name}`);
+        this.logger.info(`associated candidate for ${pkg.name}`);
       }
     }
 
@@ -495,7 +509,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       const pkgName = String(pkgKey);
       const normalized = normalizePkgName(pkgName);
       
-      this.logger.debug(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
+      this.logger.info(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
       
       // Check if this package's version is defined in an extra-versions section somewhere
       const definedIn = this.extraVersionsDefinedIn.get(normalized);
@@ -510,7 +524,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         const canonical = this.normalizedToCanonical.get(normalized) || pkgName;
         extraVersionUpdatesByFile.get(definedIn)![canonical] = String(version);
       } else {
-        this.logger.debug(`Package ${pkgName} is not defined in any extra-versions section`);
+        this.logger.info(`Package ${pkgName} is not defined in any extra-versions section`);
       }
     }
 
@@ -672,7 +686,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     visited: Set<Package>, 
     path: string[]
   ) {
-    this.logger.debug(`visiting ${name}, path: ${path.join(' -> ')}`);
+    this.logger.info(`visiting ${name}, path: ${path.join(' -> ')}`);
     if (path.indexOf(name) !== -1) {
       throw new Error(`found cycle in dependency graph: ${[...path, name].join(' -> ')}`);
     }
@@ -776,7 +790,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         }
       }
     } catch (e) {
-      this.logger.debug('getChangelogDepsNotes parse error', (e as Error).message);
+      this.logger.info('getChangelogDepsNotes parse error', (e as Error).message);
     }
 
     if (depUpdates.length === 0) return '';
