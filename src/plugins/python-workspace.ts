@@ -164,9 +164,13 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
-    // Scan all pyproject.toml files to find where extra-versions are defined
+    // FIRST: Scan ALL pyproject.toml files in repo to find where extra-versions are defined
+    // This must be done BEFORE building packages to avoid being overwritten
+    this.logger.info('Scanning for extra-versions definitions...');
     try {
       const allPyproj = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch);
+      this.logger.info(`Found ${allPyproj.length} pyproject.toml files`);
+      
       for (const p of allPyproj) {
         const pPath = typeof p === 'string' ? p : (p as any).path;
         if (!pPath) continue;
@@ -174,14 +178,16 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         try {
           const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
           if (f && typeof f.parsedContent === 'string') {
+            this.logger.debug(`Parsing ${pPath} for extra-versions...`);
             const parsed = parsePyProject(f.parsedContent) as EnhancedPyProject;
             if (parsed.tool?.releasePlease?.extraVersions) {
+              this.logger.info(`Found extra-versions section in ${pPath}`);
               // Record where each package's extra-version is defined
               for (const [pkgName, pkgVer] of Object.entries(parsed.tool.releasePlease.extraVersions)) {
                 const normalized = normalizePkgName(pkgName);
                 this.extraVersions.set(normalized, String(pkgVer));
                 this.extraVersionsDefinedIn.set(normalized, pPath);
-                this.logger.debug(`Found ${pkgName} (${normalized}) extra-version in ${pPath}`);
+                this.logger.info(`  ${pkgName} (normalized: ${normalized}) -> ${pPath}`);
               }
             }
           }
@@ -190,10 +196,21 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         }
       }
     } catch (e) {
-      this.logger.debug('scan pyproject.toml failed', (e as Error).message);
+      this.logger.warn('scan pyproject.toml failed', (e as Error).message);
+    }
+    
+    this.logger.info(`Scan complete. Found ${this.extraVersionsDefinedIn.size} packages with extra-versions`);
+    for (const [pkg, path] of this.extraVersionsDefinedIn.entries()) {
+      this.logger.info(`  ${pkg} -> ${path}`);
     }
 
-    // Build packages from configured paths
+    this.logger.info(`Scan complete. Found ${this.extraVersionsDefinedIn.size} packages with extra-versions`);
+    for (const [pkg, path] of this.extraVersionsDefinedIn.entries()) {
+      this.logger.info(`  ${pkg} -> ${path}`);
+    }
+
+    // SECOND: Build packages from configured paths
+    // DO NOT re-parse extra-versions here to avoid overwriting the map above
     for (const path in this.repositoryConfig) {
       const cfg = this.repositoryConfig[path];
       if (cfg.releaseType !== 'python') continue;
@@ -248,6 +265,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           const project = parsed.project || parsed.tool?.poetry;
           if (project?.name) name = project.name;
           if (project?.version) version = project.version;
+          // DO NOT re-read extra-versions here - we already have them from the scan above
         } catch {
           this.logger.debug(`Failed to parse pyproject.toml for ${path}`);
         }
@@ -289,7 +307,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
 
     this.logger.info(`Found ${packages.length} packages`);
-    this.logger.info(`Extra versions defined: ${Array.from(this.extraVersionsDefinedIn.keys()).join(', ')}`);
+    this.logger.info(`Extra versions tracking: ${this.extraVersionsDefinedIn.size} packages`);
+    for (const [normalized, path] of this.extraVersionsDefinedIn.entries()) {
+      const canonical = this.normalizedToCanonical.get(normalized) || normalized;
+      this.logger.info(`  ${canonical} (${normalized}) defined in ${path}`);
+    }
 
     return {allPackages: packages, candidatesByPackage};
   }
