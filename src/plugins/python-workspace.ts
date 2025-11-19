@@ -178,6 +178,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   private normalizedToCanonical: Map<string, string> = new Map();
   private extraVersions: Map<string, string> = new Map();
   private extraVersionsDefinedIn: Map<string, string> = new Map();
+  private allPackagesCache: Map<string, Package> = new Map();
 
   constructor(
     github: GitHub,
@@ -369,6 +370,12 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
 
+    // Cache packages for use in postProcessCandidates
+    this.allPackagesCache.clear();
+    for (const p of packages) {
+      this.allPackagesCache.set(normalizePkgName(p.name), p);
+    }
+
     this.logger.info(`Found ${packages.length} packages`);
     this.logger.info(`Extra versions tracking: ${this.extraVersionsDefinedIn.size} packages`);
     for (const [normalized, path] of this.extraVersionsDefinedIn.entries()) {
@@ -556,18 +563,27 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         const parentDir = pyprojectPath.replace(/\/pyproject\.toml$/, '');
         this.logger.info(`Parent package at ${parentDir} has no candidate but needs version bump for dependencies`);
         
-        // Parse the current version from the pyproject.toml
+        // Try to get the parent package from cached packages
         try {
-          const content = candidates[0]?.pullRequest.updates.find(u => u.path === pyprojectPath)?.cachedFileContents?.parsedContent;
-          if (content) {
-            const parsed = parsePyProject(content);
-            const project = parsed.project || parsed.tool?.poetry;
-            if (project?.version) {
-              const currentVersion = Version.parse(project.version);
-              const newVersion = new PatchVersionUpdate().bump(currentVersion);
-              parentsToVersionBump.set(pyprojectPath, newVersion);
-              this.logger.info(`Will bump ${parentDir} from ${currentVersion} to ${newVersion}`);
+          const parentName = parentDir.split('/').pop() || 'root';
+          const parentNormalized = normalizePkgName(parentName);
+          
+          // Look for the package in our cache by checking which one has the matching path
+          let parentPkg: Package | undefined;
+          for (const pkg of this.allPackagesCache.values()) {
+            if (pkg.path === parentDir || addPath(pkg.path, 'pyproject.toml') === pyprojectPath) {
+              parentPkg = pkg;
+              break;
             }
+          }
+          
+          if (parentPkg?.version) {
+            const currentVersion = Version.parse(parentPkg.version);
+            const newVersion = new PatchVersionUpdate().bump(currentVersion);
+            parentsToVersionBump.set(pyprojectPath, newVersion);
+            this.logger.info(`Will bump ${parentDir} from ${currentVersion} to ${newVersion}`);
+          } else {
+            this.logger.warn(`Could not find version for parent package at ${parentDir}`);
           }
         } catch (e) {
           this.logger.warn(`Failed to parse parent version: ${(e as Error).message}`);
