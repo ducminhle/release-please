@@ -67,6 +67,11 @@ function wrapUpdater(u: any): {updateContent(old?: string): string} {
   return {updateContent: (old?: string) => (typeof u === 'string' ? u : (u && typeof u.toString === 'function' ? u.toString() : old || ''))};
 }
 
+/*
+  PyProjectExtraVersionsUpdater:
+  - Merge incoming extra-versions into existing section, overwriting keys in-place.
+  - If section absent, append a single section.
+*/
 class PyProjectExtraVersionsUpdater {
   private extraVersions: Record<string, string>;
   constructor(options: {extraVersions: Record<string, string>}) {
@@ -76,39 +81,40 @@ class PyProjectExtraVersionsUpdater {
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
-    if (headerRe.test(content)) {
-      const start = content.search(headerRe);
-      if (start === -1) return this.appendNewSection(content);
-      const after = content.slice(start);
-      const nextTableRe = /^\s*\[.+\]/m;
-      const m = nextTableRe.exec(after.slice(1));
-      let endIndex: number;
-      if (m && m.index >= 0) endIndex = start + 1 + m.index;
-      else endIndex = content.length;
-      const before = content.slice(0, start);
-      const section = content.slice(start, endIndex);
-      const afterSection = content.slice(endIndex);
-      const lines = section.split(/\r?\n/);
-      const existing: Record<string, string> = {};
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
-        const eq = line.indexOf('=');
-        if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
-        const valRaw = line.slice(eq + 1).trim();
-        const val = valRaw.replace(/^['"]|['"]$/g, '').split('#')[0].trim();
-        existing[key] = val;
-      }
-      const merged = {...existing};
-      for (const k of Object.keys(this.extraVersions)) merged[k] = this.extraVersions[k];
-      const headerLine = '[tool.release-please.extra-versions]';
-      const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
-      const newSection = [headerLine, ...entryLines].join('\n') + '\n';
-      return before + newSection + afterSection;
-    } else {
-      return this.appendNewSection(content);
+    if (!headerRe.test(content)) return this.appendNewSection(content);
+
+    const start = content.search(headerRe);
+    const after = content.slice(start);
+    const nextTableRe = /^\s*\[.+\]/m;
+    const m = nextTableRe.exec(after.slice(1));
+    let endIndex: number;
+    if (m && m.index >= 0) endIndex = start + 1 + m.index;
+    else endIndex = content.length;
+
+    const before = content.slice(0, start);
+    const section = content.slice(start, endIndex);
+    const afterSection = content.slice(endIndex);
+
+    const existing: Record<string, string> = {};
+    const lines = section.split(/\r?\n/);
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t.startsWith('#') || t.startsWith('[')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      const valRaw = line.slice(eq + 1).trim();
+      const val = valRaw.replace(/^['"]|['"]$/g, '').split('#')[0].trim();
+      if (key) existing[key] = val;
     }
+
+    const merged: Record<string, string> = {...existing};
+    for (const k of Object.keys(this.extraVersions)) merged[k] = this.extraVersions[k];
+
+    const headerLine = '[tool.release-please.extra-versions]';
+    const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
+    const newSection = [headerLine, ...entryLines].join('\n') + '\n';
+    return before + newSection + afterSection;
   }
 
   private appendNewSection(content: string): string {
@@ -121,6 +127,7 @@ class PyProjectExtraVersionsUpdater {
 export class PythonWorkspace extends WorkspacePlugin<Package> {
   private normalizedToCanonical: Map<string, string> = new Map();
   private extraVersions: Map<string, string> = new Map();
+  // Map normalized package name -> pyproject.toml path that defines it in extra-versions
   private extraVersionsDefinedIn: Map<string, string> = new Map();
 
   constructor(
@@ -143,7 +150,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const candidatesByPackage: Record<string, CandidateReleasePullRequest> = {};
     const packages: Package[] = [];
 
-    // FIRST: Scan ALL pyproject.toml files in repo to find where extra-versions are defined
+    // Scan pyproject.toml files for extra-versions definitions
     this.logger.info('Scanning for extra-versions definitions...');
     try {
       const allPyproj = await this.github.findFilesByFilenameAndRef('pyproject.toml', this.targetBranch) || [];
@@ -159,20 +166,17 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             continue;
           }
 
-          // parse and support both camelCase and kebab-case keys
           try {
             const parsed = parsePyProject(raw) as EnhancedPyProject;
             const toolKeys = parsed.tool ? Object.keys(parsed.tool) : [];
             this.logger.info(`Parsed structure for ${pPath}: ${JSON.stringify({hasProject: !!parsed.project, hasTool: !!parsed.tool, toolKeys})}`);
 
-            // prefer camelCase then kebab-case for release-please section
             const rpCandidate =
               (parsed.tool && (parsed.tool as any).releasePlease) ||
               (parsed.tool && (parsed.tool as any)['release-please']) ||
               null;
 
             if (rpCandidate) {
-              // prefer camelCase then kebab-case for extra-versions
               const ev = rpCandidate.extraVersions || rpCandidate['extra-versions'] || null;
               if (ev && typeof ev === 'object' && Object.keys(ev).length > 0) {
                 this.logger.info(`Found extra-versions section in ${pPath}`);
@@ -193,7 +197,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             this.logger.info(`Parser error for ${pPath}: ${(parseErr as Error).message}`);
           }
 
-          // fallback: text-scan for [tool.release-please.extra-versions]
+          // fallback text-scan
           const found = this.extractExtraVersionsFromContent(raw);
           if (found && Object.keys(found).length > 0) {
             this.logger.info(`Found extra-versions in ${pPath} via text-scan`);
@@ -219,10 +223,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       this.logger.info(`  ${pkg} -> ${path}`);
     }
 
-    // SECOND: Build packages from configured paths
+    // Build package list from repositoryConfig
     for (const path in this.repositoryConfig) {
       const cfg = this.repositoryConfig[path];
       if (cfg.releaseType !== 'python') continue;
+
       const candidate = candidatesByPath.get(path);
 
       let setupCfgContent: string | null = null;
@@ -309,7 +314,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    // normalized -> canonical map
+    // Build normalized -> canonical map
     this.normalizedToCanonical = new Map();
     for (const p of packages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
 
@@ -354,6 +359,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       } else if (update.path === addPath(existingCandidate.path, 'setup.py')) {
         update.updater = new CompositeUpdater(wrapUpdater(update.updater) as any, wrapUpdater(new SetupPy({version: newVersion})) as any) as any;
       } else if (update.path === addPath(existingCandidate.path, 'pyproject.toml')) {
+        // ensure pyproject version is updated for package's own pyproject
         const base = wrapUpdater(update.updater);
         const pyprojUpd = wrapUpdater(new PyProjectToml({version: newVersion}));
         update.updater = new CompositeUpdater(base as any, pyprojUpd as any) as any;
@@ -437,16 +443,21 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     const extraVersionUpdatesByFile = new Map<string, Record<string, string>>();
 
+    // Build normalized updated map for easy lookup
+    const normalizedUpdated = new Map<string, Version>();
+    updatedVersions.forEach((v, k) => normalizedUpdated.set(normalizePkgName(String(k)), v as Version));
+
+    // Group updates by pyproject.toml path
     for (const [pkgKey, version] of updatedVersions.entries()) {
       const pkgName = String(pkgKey);
       const normalized = normalizePkgName(pkgName);
       this.logger.info(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
       const definedIn = this.extraVersionsDefinedIn.get(normalized);
       if (definedIn) {
-        this.logger.info(`Package ${pkgName} extra-version should be updated in ${definedIn}`);
         if (!extraVersionUpdatesByFile.has(definedIn)) extraVersionUpdatesByFile.set(definedIn, {});
         const canonical = this.normalizedToCanonical.get(normalized) || pkgName;
         extraVersionUpdatesByFile.get(definedIn)![canonical] = String(version);
+        this.logger.info(`Will update extra-version for ${pkgName} in ${definedIn}`);
       } else {
         this.logger.info(`Package ${pkgName} is not defined in any extra-versions section`);
       }
@@ -456,6 +467,8 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
     for (const [pyprojectPath, extraVersions] of extraVersionUpdatesByFile.entries()) {
       this.logger.info(`Will update extra-versions in ${pyprojectPath}: ${JSON.stringify(extraVersions)}`);
+
+      // find target candidate to attach updater to
       let targetCandidate: CandidateReleasePullRequest | undefined;
       for (const candidate of candidates) {
         const candidatePyprojectPath = addPath(candidate.path, 'pyproject.toml');
@@ -471,12 +484,79 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
       const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
       const existing = targetCandidate.pullRequest.updates.find(u => u.path === pyprojectPath);
-      if (existing) existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
-      else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: extraUpd as any});
+
+      if (existing) {
+        existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
+      } else {
+        // Determine whether this pyproject is also the package being bumped and get its new version from updatedVersions
+        // Strategy:
+        // - If any normalized package that maps to this pyproject (via extraVersionsDefinedIn) has a matching canonical equal to a package whose candidate.path equals targetCandidate.path,
+        //   or if candidate.path + '/pyproject.toml' === pyprojectPath and that candidate has an updated version in normalizedUpdated,
+        //   then add PyProjectToml updater with that new version.
+        let projectVersionUpdater: any | null = null;
+
+        // 1) If this pyproject is the pyproject of a candidate (candidate.path + '/pyproject.toml' === pyprojectPath), check if that candidate/package was updated
+        const candidateForPyproject = candidates.find(c => addPath(c.path, 'pyproject.toml') === pyprojectPath);
+        if (candidateForPyproject) {
+          // canonical name for this candidate (if known)
+          const candidateCanonical = this.normalizedToCanonical.get(normalizePkgName(candidateForPyproject.path)) || null;
+          // try to find updatedVersions entry for canonical or by scanning normalizedUpdated for a package whose pyprojectPath equals this path
+          for (const [norm, ver] of normalizedUpdated.entries()) {
+            // if the candidate's package normalized name matches the updated one, use it
+            if (candidateCanonical && normalizePkgName(candidateCanonical) === norm) {
+              projectVersionUpdater = new PyProjectToml({version: ver as Version});
+              break;
+            }
+          }
+          // fallback: try match by candidate path -> package name mapping (if present)
+          if (!projectVersionUpdater) {
+            // attempt to find updated version for the package that has same canonical as any package defined in normalizedToCanonical for this candidate path
+            for (const [normPkg, canonicalName] of this.normalizedToCanonical.entries()) {
+              if (this.extraVersionsDefinedIn.get(normPkg) === pyprojectPath) {
+                const ver = normalizedUpdated.get(normPkg);
+                if (ver) { projectVersionUpdater = new PyProjectToml({version: ver as Version}); break; }
+              }
+            }
+          }
+        } else {
+          // 2) pyproject is a shared workspace file (defines extraVersions for others). We should not use extraVersions values to set project.version.
+          // However if any package that is defined inside this pyproject is itself being bumped and that package's canonical maps to a candidate whose pyproject is this file,
+          // we could update project.version only if that candidate path equals this pyproject's owner (rare). Default: do not set project version here.
+          for (const [normPkg, pathDefined] of this.extraVersionsDefinedIn.entries()) {
+            if (pathDefined === pyprojectPath) {
+              const ver = normalizedUpdated.get(normPkg);
+              if (ver) {
+                // only set project version if we can identify a candidate whose own pyproject equals this path
+                const maybeCandidate = candidates.find(c => addPath(c.path, 'pyproject.toml') === pyprojectPath);
+                if (maybeCandidate) {
+                  projectVersionUpdater = new PyProjectToml({version: ver as Version});
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (projectVersionUpdater) {
+          // Composite updater: update project.version (from computed updatedVersions) AND merge extra-versions section
+          targetCandidate.pullRequest.updates.push({
+            path: pyprojectPath,
+            createIfMissing: false,
+            updater: new CompositeUpdater(projectVersionUpdater as any, extraUpd as any) as any,
+          });
+        } else {
+          // Only update extra-versions section; do not touch project.version
+          targetCandidate.pullRequest.updates.push({
+            path: pyprojectPath,
+            createIfMissing: false,
+            updater: extraUpd as any,
+          });
+        }
+      }
     }
 
+    // Merge multiple candidates into primary if needed
     if (candidates.length <= 1) return candidates;
-
     const primary = candidates[0];
     for (let i = 1; i < candidates.length; i++) {
       const c = candidates[i];
@@ -502,6 +582,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const graph = new Map<string, DependencyNode<Package>>();
     this.normalizedToCanonical = new Map();
     for (const p of allPackages) this.normalizedToCanonical.set(normalizePkgName(p.name), p.name);
+
     for (const pkg of allPackages) {
       const deps: string[] = [];
       if (pkg.pyproject) {
@@ -528,6 +609,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       const pkgKey = normalizePkgName(pkg.name);
       graph.set(pkgKey, {deps, value: pkg});
     }
+
     return graph;
   }
 
@@ -576,6 +658,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           }
         }
       }
+
       if (pkg.setupCfg) {
         const match = pkg.setupCfg.match(/\[options\]([\s\S]*?)(\n\[|$)/m);
         if (match) {
@@ -608,6 +691,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           }
         }
       }
+
       if (pkg.setupPy) {
         const m = pkg.setupPy.match(/install_requires\s*=\s*\[([\s\S]*?)\]/m);
         if (m) {
@@ -677,5 +761,5 @@ function normalizePkgName(name: string): string {
   if (!name) return name;
   const beforeMarker = name.split(';')[0];
   const beforeExtras = beforeMarker.split('[')[0];
-  return beforeExtras.trim().toLowerCase().replace(/_+/g, '-');
+  return beforeExtras.trim().toLowerCase().replace(/[\s_]+/g, '-');
 }
