@@ -31,7 +31,6 @@ import {
 import {SetupCfg} from '../updaters/python/setup-cfg';
 import {SetupPy} from '../updaters/python/setup-py';
 import {PyProjectToml, parsePyProject, PyProject} from '../updaters/python/pyproject-toml';
-import {replaceTomlValue} from '../util/toml-edit';
 import {PythonFileWithVersion} from '../updaters/python/python-file-with-version';
 import {CompositeUpdater} from '../updaters/composite';
 import {PatchVersionUpdate} from '../versioning-strategy';
@@ -147,7 +146,7 @@ class PyProjectCombinedUpdater {
   constructor(private version: Version, private extraVersions?: Record<string, string>) {}
 
   updateContent(content: string): string {
-    // First, update the version using the standard mechanism
+    // First, update the version using simple regex replacement
     const parsed = parsePyProject(content);
     const project = parsed.project || parsed.tool?.poetry;
 
@@ -158,10 +157,22 @@ class PyProjectCombinedUpdater {
       throw new Error('invalid file');
     }
 
-    // Use TOML to rebuild with proper formatting
+    // Replace the version line directly with regex
     let result = content;
-    const pathToVersion = parsed.project ? ['project', 'version'] : ['tool', 'poetry', 'version'];
-    result = replaceTomlValue(result, pathToVersion, this.version.toString());
+    
+    if (parsed.project) {
+      // PEP 518 format: [project] section with version = "..."
+      result = result.replace(
+        /^(\s*version\s*=\s*)["']([^"']+)["']/m,
+        `$1"${this.version.toString()}"`
+      );
+    } else {
+      // Poetry format: [tool.poetry] section with version = "..."
+      result = result.replace(
+        /^(\s*version\s*=\s*)["']([^"']+)["']/m,
+        `$1"${this.version.toString()}"`
+      );
+    }
 
     // Then, update extra-versions if provided
     if (this.extraVersions && Object.keys(this.extraVersions).length > 0) {
