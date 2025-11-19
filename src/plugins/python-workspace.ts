@@ -77,29 +77,49 @@ class PyProjectExtraVersionsUpdater {
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
     
-    // Use regex to find and replace the entire extra-versions section
-    // This pattern matches from [tool.release-please.extra-versions] to the next section or EOF
-    const sectionPattern = /^\[tool\.release-please\.extra-versions\]\s*\n([\s\S]*?)(?=^\[|$)/m;
-    const match = sectionPattern.exec(content);
+    // Find the header line
+    const headerPattern = /^\[tool\.release-please\.extra-versions\]/m;
+    const headerMatch = headerPattern.exec(content);
     
-    if (!match) {
+    if (!headerMatch) {
       // Section doesn't exist, append new one
       return this.appendNewSection(content);
     }
 
-    // Parse existing entries from the matched section
+    // Find where this section starts and ends
+    const sectionStart = headerMatch.index;
+    const afterHeader = content.slice(headerMatch.index + headerMatch[0].length);
+    
+    // Find the next section header or EOF
+    const nextSectionMatch = /\n\[/.exec(afterHeader);
+    let sectionEnd: number;
+    
+    if (nextSectionMatch) {
+      // End just before the newline of the next section
+      sectionEnd = sectionStart + headerMatch[0].length + nextSectionMatch.index;
+    } else {
+      // End at EOF
+      sectionEnd = content.length;
+    }
+
+    // Extract the content between header and next section
+    const beforeSection = content.slice(0, sectionStart);
+    const sectionContent = content.slice(headerMatch.index + headerMatch[0].length, sectionEnd);
+    const afterSection = content.slice(sectionEnd);
+
+    // Parse existing entries
     const existing: Record<string, string> = {};
-    const sectionContent = match[1];
     const lines = sectionContent.split(/\r?\n/);
     
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
       const eq = line.indexOf('=');
       if (eq === -1) continue;
       const key = line.slice(0, eq).trim();
       const valRaw = line.slice(eq + 1).trim();
-      const val = valRaw.replace(/^['"]|['"]$/g, '').split('#')[0].trim();
+      // Extract value carefully - remove quotes and comments
+      const val = valRaw.replace(/^["']/, '').replace(/["'].*$/, '').trim();
       if (key) existing[key] = val;
     }
 
@@ -109,13 +129,13 @@ class PyProjectExtraVersionsUpdater {
       merged[k] = this.extraVersions[k];
     }
 
-    // Reconstruct the section
+    // Reconstruct the entire section (header + entries)
     const headerLine = '[tool.release-please.extra-versions]';
     const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
     const newSection = headerLine + '\n' + entryLines.join('\n') + '\n';
     
-    // Replace the entire matched section with the new one
-    return content.replace(sectionPattern, newSection);
+    // Combine: before + new section + after
+    return beforeSection + newSection + afterSection;
   }
 
   private appendNewSection(content: string): string {
