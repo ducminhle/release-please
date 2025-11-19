@@ -35,6 +35,7 @@ import {replaceTomlValue} from '../util/toml-edit';
 import {PythonFileWithVersion} from '../updaters/python/python-file-with-version';
 import {CompositeUpdater} from '../updaters/composite';
 import {PatchVersionUpdate} from '../versioning-strategy';
+import {ReleasePleaseManifest} from '../updaters/release-please-manifest';
 
 interface Package {
   path: string;
@@ -602,9 +603,23 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       // If parent needs version bump, use combined updater
       if (parentsToVersionBump.has(pyprojectPath)) {
         const newVersion = parentsToVersionBump.get(pyprojectPath)!;
+        
+        // Find the parent package to get its content
+        const parentPkg = Array.from(this.allPackagesCache.values()).find(
+          pkg => addPath(pkg.path, 'pyproject.toml') === pyprojectPath
+        );
+        
         const combinedUpd = new PyProjectCombinedUpdater(newVersion, extraVersions);
-        if (existing) existing.updater = combinedUpd as any;
-        else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: combinedUpd as any});
+        if (existing) {
+          existing.updater = combinedUpd as any;
+        } else {
+          // Create new update for parent pyproject.toml
+          targetCandidate.pullRequest.updates.push({
+            path: pyprojectPath,
+            createIfMissing: false,
+            updater: combinedUpd as any,
+          });
+        }
         
         // Update the release data for the parent package
         const parentName = pyprojectPath.replace(/\/pyproject\.toml$/, '').split('/').pop() || 'root';
@@ -617,6 +632,14 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
             version: newVersion,
             notes: '',
           });
+        }
+        
+        // Also update the manifest updater if it exists in the updates
+        const manifestUpdate = targetCandidate.pullRequest.updates.find(u => u.path === '.release-please-manifest.json');
+        if (manifestUpdate && manifestUpdate.updater instanceof ReleasePleaseManifest) {
+          // Create new manifest updater with updated versions map
+          const parentDir = pyprojectPath.replace(/\/pyproject\.toml$/, '');
+          (manifestUpdate.updater as any).versionsMap.set(parentPkg?.path || parentDir, newVersion);
         }
       } else {
         const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
