@@ -76,42 +76,25 @@ class PyProjectExtraVersionsUpdater {
 
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
-    const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
-    const hasSection = headerRe.test(content);
     
-    if (!hasSection) {
+    // Use regex to find and replace the entire extra-versions section
+    // This pattern matches from [tool.release-please.extra-versions] to the next section or EOF
+    const sectionPattern = /^\[tool\.release-please\.extra-versions\]\s*\n([\s\S]*?)(?=^\[|$)/m;
+    const match = sectionPattern.exec(content);
+    
+    if (!match) {
+      // Section doesn't exist, append new one
       return this.appendNewSection(content);
     }
 
-    // Find the section and merge entries
-    const start = content.search(headerRe);
-    if (start === -1) return this.appendNewSection(content);
-
-    // Find the end of this section (next [section] or EOF)
-    const after = content.slice(start);
-    const nextTableRe = /^\s*\[.+\]/m;
-    const nextMatch = nextTableRe.exec(after.slice(after.indexOf('\n') + 1 || 0));
-    let endIndex: number;
-    
-    if (nextMatch) {
-      // Find the actual position in the original string
-      const lineAfterHeader = after.indexOf('\n') + 1;
-      endIndex = start + lineAfterHeader + nextMatch.index;
-    } else {
-      endIndex = content.length;
-    }
-
-    const before = content.slice(0, start);
-    const section = content.slice(start, endIndex);
-    const afterSection = content.slice(endIndex);
-
-    // Parse existing entries
-    const lines = section.split(/\r?\n/);
+    // Parse existing entries from the matched section
     const existing: Record<string, string> = {};
+    const sectionContent = match[1];
+    const lines = sectionContent.split(/\r?\n/);
     
     for (const line of lines) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
+      if (!trimmed || trimmed.startsWith('#')) continue;
       const eq = line.indexOf('=');
       if (eq === -1) continue;
       const key = line.slice(0, eq).trim();
@@ -120,7 +103,7 @@ class PyProjectExtraVersionsUpdater {
       if (key) existing[key] = val;
     }
 
-    // Merge with new versions
+    // Merge with new versions (new versions override existing ones)
     const merged: Record<string, string> = {...existing};
     for (const k of Object.keys(this.extraVersions)) {
       merged[k] = this.extraVersions[k];
@@ -131,7 +114,8 @@ class PyProjectExtraVersionsUpdater {
     const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
     const newSection = headerLine + '\n' + entryLines.join('\n') + '\n';
     
-    return before + newSection + afterSection;
+    // Replace the entire matched section with the new one
+    return content.replace(sectionPattern, newSection);
   }
 
   private appendNewSection(content: string): string {
@@ -157,22 +141,40 @@ class PyProjectCombinedUpdater {
       throw new Error('invalid file');
     }
 
-    // Replace the version line directly with regex
     let result = content;
     
-    if (parsed.project) {
-      // PEP 518 format: [project] section with version = "..."
-      result = result.replace(
-        /^(\s*version\s*=\s*)["']([^"']+)["']/m,
-        `$1"${this.version.toString()}"`
-      );
-    } else {
-      // Poetry format: [tool.poetry] section with version = "..."
-      result = result.replace(
-        /^(\s*version\s*=\s*)["']([^"']+)["']/m,
-        `$1"${this.version.toString()}"`
-      );
+    // Find and replace the version line, but only in the appropriate section
+    const lines = result.split('\n');
+    let inProjectSection = false;
+    let inPoetrySection = false;
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      
+      // Track which section we're in
+      if (trimmed === '[project]') {
+        inProjectSection = true;
+        inPoetrySection = false;
+      } else if (trimmed === '[tool.poetry]') {
+        inProjectSection = false;
+        inPoetrySection = true;
+      } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        // Entering a different section
+        inProjectSection = false;
+        inPoetrySection = false;
+      }
+      
+      // Replace version in the correct section
+      if ((parsed.project && inProjectSection) || (!parsed.project && inPoetrySection)) {
+        if (trimmed.startsWith('version') && trimmed.includes('=')) {
+          const versionRe = /^(\s*version\s*=\s*)["']([^"']+)["']/;
+          lines[i] = lines[i].replace(versionRe, `$1"${this.version.toString()}"`);
+        }
+      }
     }
+    
+    result = lines.join('\n');
 
     // Then, update extra-versions if provided
     if (this.extraVersions && Object.keys(this.extraVersions).length > 0) {
