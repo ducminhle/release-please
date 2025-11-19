@@ -211,7 +211,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           const f = await this.github.getFileContentsOnBranch(pPath, this.targetBranch);
           const raw = this.extractFileContentString(f);
           if (!raw) {
-            this.logger.debug(`No content for ${pPath}`);
+            this.logger.info(`No content for ${pPath}`);
             continue;
           }
 
@@ -219,7 +219,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           try {
             const parsed = parsePyProject(raw) as EnhancedPyProject;
             const toolKeys = parsed.tool ? Object.keys(parsed.tool) : [];
-            this.logger.debug(`Parsed structure for ${pPath}: ${JSON.stringify({hasProject: !!parsed.project, hasTool: !!parsed.tool, toolKeys})}`);
+            this.logger.info(`Parsed structure for ${pPath}: ${JSON.stringify({hasProject: !!parsed.project, hasTool: !!parsed.tool, toolKeys})}`);
 
             // prefer camelCase then kebab-case for release-please section
             const rpCandidate =
@@ -240,13 +240,13 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
                 }
                 continue;
               } else {
-                this.logger.debug(`release-please present but no extra-versions in ${pPath}`);
+                this.logger.info(`release-please present but no extra-versions in ${pPath}`);
               }
             } else {
-              this.logger.debug(`No release-please tool entry in ${pPath}`);
+              this.logger.info(`No release-please tool entry in ${pPath}`);
             }
           } catch (parseErr) {
-            this.logger.debug(`Parser error for ${pPath}: ${(parseErr as Error).message}`);
+            this.logger.info(`Parser error for ${pPath}: ${(parseErr as Error).message}`);
           }
 
           // fallback: text-scan for [tool.release-please.extra-versions]
@@ -260,10 +260,10 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
               this.logger.info(`  ${pkgName} (normalized: ${normalized}) -> ${pPath}`);
             }
           } else {
-            this.logger.debug(`No extra-versions found in ${pPath} by text-scan`);
+            this.logger.info(`No extra-versions found in ${pPath} by text-scan`);
           }
         } catch (err) {
-          this.logger.debug(`Failed to read ${pPath}: ${(err as Error).message}`);
+          this.logger.info(`Failed to read ${pPath}: ${(err as Error).message}`);
         }
       }
     } catch (e) {
@@ -330,7 +330,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           if (project?.name) name = project.name;
           if (project?.version) version = project.version;
         } catch {
-          this.logger.debug(`Failed to parse pyproject.toml for ${path}`);
+          this.logger.info(`Failed to parse pyproject.toml for ${path}`);
         }
       }
 
@@ -361,7 +361,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
       if (candidate) {
         candidatesByPackage[normalizePkgName(pkg.name)] = candidate;
-        this.logger.debug(`associated candidate for ${pkg.name}`);
+        this.logger.info(`associated candidate for ${pkg.name}`);
       }
     }
 
@@ -520,7 +520,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     for (const [pkgKey, version] of updatedVersions.entries()) {
       const pkgName = String(pkgKey);
       const normalized = normalizePkgName(pkgName);
-      this.logger.debug(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
+      this.logger.info(`Checking package: ${pkgName} (normalized: ${normalized}), version: ${String(version)}`);
       const definedIn = this.extraVersionsDefinedIn.get(normalized);
       if (definedIn) {
         this.logger.info(`Package ${pkgName} extra-version should be updated in ${definedIn}`);
@@ -528,12 +528,15 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         const canonical = this.normalizedToCanonical.get(normalized) || pkgName;
         extraVersionUpdatesByFile.get(definedIn)![canonical] = String(version);
       } else {
-        this.logger.debug(`Package ${pkgName} is not defined in any extra-versions section`);
+        this.logger.info(`Package ${pkgName} is not defined in any extra-versions section`);
       }
     }
 
     this.logger.info(`Found ${extraVersionUpdatesByFile.size} files that need extra-version updates`);
 
+    // Track which files have parents that need version bumping
+    const parentsToVersionBump = new Map<string, Version>();
+    
     for (const [pyprojectPath, extraVersions] of extraVersionUpdatesByFile.entries()) {
       this.logger.info(`Will update extra-versions in ${pyprojectPath}: ${JSON.stringify(extraVersions)}`);
       let targetCandidate: CandidateReleasePullRequest | undefined;
@@ -547,18 +550,63 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           if (candidate.path.startsWith(pyprojectDir + '/') || candidate.path === pyprojectDir) { targetCandidate = candidate; break; }
         }
       }
+      
+      // If we still don't have a candidate, this is a parent package not in candidates - need to bump its version
+      if (!targetCandidate) {
+        const parentDir = pyprojectPath.replace(/\/pyproject\.toml$/, '');
+        this.logger.info(`Parent package at ${parentDir} has no candidate but needs version bump for dependencies`);
+        
+        // Parse the current version from the pyproject.toml
+        try {
+          const content = candidates[0]?.pullRequest.updates.find(u => u.path === pyprojectPath)?.cachedFileContents?.parsedContent;
+          if (content) {
+            const parsed = parsePyProject(content);
+            const project = parsed.project || parsed.tool?.poetry;
+            if (project?.version) {
+              const currentVersion = Version.parse(project.version);
+              const newVersion = new PatchVersionUpdate().bump(currentVersion);
+              parentsToVersionBump.set(pyprojectPath, newVersion);
+              this.logger.info(`Will bump ${parentDir} from ${currentVersion} to ${newVersion}`);
+            }
+          }
+        } catch (e) {
+          this.logger.warn(`Failed to parse parent version: ${(e as Error).message}`);
+        }
+      }
+      
       if (!targetCandidate) targetCandidate = candidates[0];
 
       const existing = targetCandidate.pullRequest.updates.find(u => u.path === pyprojectPath);
       // Skip if already using combined updater (which handles extra-versions)
       if (existing && existing.updater instanceof PyProjectCombinedUpdater) {
-        this.logger.debug(`Skipping extra-versions update for ${pyprojectPath} - already handled by combined updater`);
+        this.logger.info(`Skipping extra-versions update for ${pyprojectPath} - already handled by combined updater`);
         continue;
       }
       
-      const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
-      if (existing) existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
-      else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: extraUpd as any});
+      // If parent needs version bump, use combined updater
+      if (parentsToVersionBump.has(pyprojectPath)) {
+        const newVersion = parentsToVersionBump.get(pyprojectPath)!;
+        const combinedUpd = new PyProjectCombinedUpdater(newVersion, extraVersions);
+        if (existing) existing.updater = combinedUpd as any;
+        else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: combinedUpd as any});
+        
+        // Update the release data for the parent package
+        const parentName = pyprojectPath.replace(/\/pyproject\.toml$/, '').split('/').pop() || 'root';
+        const existingReleaseData = targetCandidate.pullRequest.body.releaseData.find(rd => rd.component === parentName);
+        if (existingReleaseData) {
+          existingReleaseData.version = newVersion;
+        } else {
+          targetCandidate.pullRequest.body.releaseData.push({
+            component: parentName,
+            version: newVersion,
+            notes: '',
+          });
+        }
+      } else {
+        const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
+        if (existing) existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
+        else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: extraUpd as any});
+      }
     }
 
     if (candidates.length <= 1) return candidates;
@@ -626,7 +674,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
   }
 
   private visitForward(graph: DependencyGraph<Package>, name: string, visited: Set<Package>, path: string[]) {
-    this.logger.debug(`visiting ${name}, path: ${path.join(' -> ')}`);
+    this.logger.info(`visiting ${name}, path: ${path.join(' -> ')}`);
     if (path.indexOf(name) !== -1) throw new Error(`found cycle in dependency graph: ${[...path, name].join(' -> ')}`);
     const node = graph.get(name);
     if (!node) { this.logger.warn(`Didn't find node: ${name} in graph`); return; }
@@ -709,7 +757,7 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
         }
       }
     } catch (e) {
-      this.logger.debug('getChangelogDepsNotes parse error', (e as Error).message);
+      this.logger.info('getChangelogDepsNotes parse error', (e as Error).message);
     }
     if (depUpdates.length === 0) return '';
     return `* The following workspace dependencies were updated:\n${depUpdates.join('\n')}`;
