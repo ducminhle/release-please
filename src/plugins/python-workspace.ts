@@ -51,6 +51,10 @@ interface EnhancedPyProject extends PyProject {
     releasePlease?: {
       extraVersions?: Record<string, string>;
     };
+    // Support both camelCase and kebab-case
+    'release-please'?: {
+      'extra-versions'?: Record<string, string>;
+    };
   };
 }
 
@@ -202,11 +206,11 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
                 this.logger.info(`No extra-versions found in ${pPath}`);
               }
             } catch (parseErr) {
-              this.logger.error(`Failed to parse ${pPath}:`, (parseErr as Error).message);
+              this.logger.warn(`Failed to parse ${pPath}:`, (parseErr as Error).message);
             }
           }
         } catch (err) {
-          this.logger.error(`Failed to read ${pPath}: ${(err as Error).message}`);
+          this.logger.info(`Failed to read ${pPath}: ${(err as Error).message}`);
         }
       }
     } catch (e) {
