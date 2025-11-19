@@ -31,6 +31,7 @@ import {
 import {SetupCfg} from '../updaters/python/setup-cfg';
 import {SetupPy} from '../updaters/python/setup-py';
 import {PyProjectToml, parsePyProject, PyProject} from '../updaters/python/pyproject-toml';
+import {replaceTomlValue} from '../util/toml-edit';
 import {PythonFileWithVersion} from '../updaters/python/python-file-with-version';
 import {CompositeUpdater} from '../updaters/composite';
 import {PatchVersionUpdate} from '../versioning-strategy';
@@ -76,47 +77,102 @@ class PyProjectExtraVersionsUpdater {
   updateContent(oldContent?: string): string {
     const content = oldContent || '';
     const headerRe = /^\s*\[tool\.release-please\.extra-versions\]\s*$/m;
-    if (headerRe.test(content)) {
-      const start = content.search(headerRe);
-      if (start === -1) return this.appendNewSection(content);
-      const after = content.slice(start);
-      const nextTableRe = /^\s*\[.+\]/m;
-      const m = nextTableRe.exec(after.slice(1));
-      let endIndex: number;
-      if (m && m.index >= 0) endIndex = start + 1 + m.index;
-      else endIndex = content.length;
-      const before = content.slice(0, start);
-      const section = content.slice(start, endIndex);
-      const afterSection = content.slice(endIndex);
-      const lines = section.split(/\r?\n/);
-      const existing: Record<string, string> = {};
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
-        const eq = line.indexOf('=');
-        if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
-        const valRaw = line.slice(eq + 1).trim();
-        const val = valRaw.replace(/^['"]|['"]$/g, '').split('#')[0].trim();
-        existing[key] = val;
-      }
-      const merged = {...existing};
-      for (const k of Object.keys(this.extraVersions)) merged[k] = this.extraVersions[k];
-      const headerLine = '[tool.release-please.extra-versions]';
-      const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
-      const newSection = [headerLine, ...entryLines].join('\n') + '\n';
-      return before + newSection + afterSection;
-    } else {
+    const hasSection = headerRe.test(content);
+    
+    if (!hasSection) {
       return this.appendNewSection(content);
     }
+
+    // Find the section and merge entries
+    const start = content.search(headerRe);
+    if (start === -1) return this.appendNewSection(content);
+
+    // Find the end of this section (next [section] or EOF)
+    const after = content.slice(start);
+    const nextTableRe = /^\s*\[.+\]/m;
+    const nextMatch = nextTableRe.exec(after.slice(after.indexOf('\n') + 1 || 0));
+    let endIndex: number;
+    
+    if (nextMatch) {
+      // Find the actual position in the original string
+      const lineAfterHeader = after.indexOf('\n') + 1;
+      endIndex = start + lineAfterHeader + nextMatch.index;
+    } else {
+      endIndex = content.length;
+    }
+
+    const before = content.slice(0, start);
+    const section = content.slice(start, endIndex);
+    const afterSection = content.slice(endIndex);
+
+    // Parse existing entries
+    const lines = section.split(/\r?\n/);
+    const existing: Record<string, string> = {};
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
+      const eq = line.indexOf('=');
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      const valRaw = line.slice(eq + 1).trim();
+      const val = valRaw.replace(/^['"]|['"]$/g, '').split('#')[0].trim();
+      if (key) existing[key] = val;
+    }
+
+    // Merge with new versions
+    const merged: Record<string, string> = {...existing};
+    for (const k of Object.keys(this.extraVersions)) {
+      merged[k] = this.extraVersions[k];
+    }
+
+    // Reconstruct the section
+    const headerLine = '[tool.release-please.extra-versions]';
+    const entryLines = Object.keys(merged).sort().map(k => `${k} = "${merged[k]}" # x-release-please-version`);
+    const newSection = headerLine + '\n' + entryLines.join('\n') + '\n';
+    
+    return before + newSection + afterSection;
   }
 
   private appendNewSection(content: string): string {
-    const headerLine = '\n[tool.release-please.extra-versions]\n';
     const entryLines = Object.keys(this.extraVersions).sort().map(k => `${k} = "${this.extraVersions[k]}" # x-release-please-version`);
-    return content + headerLine + entryLines.join('\n') + '\n';
+    const newSection = '\n[tool.release-please.extra-versions]\n' + entryLines.join('\n') + '\n';
+    return content + newSection;
   }
 }
+
+// Combined updater that handles both version bump and extra-versions in a single pass
+class PyProjectCombinedUpdater {
+  constructor(private version: Version, private extraVersions?: Record<string, string>) {}
+
+  updateContent(content: string): string {
+    // First, update the version using the standard mechanism
+    const parsed = parsePyProject(content);
+    const project = parsed.project || parsed.tool?.poetry;
+
+    if (!project?.version) {
+      if (project?.dynamic && project.dynamic.includes('version')) {
+        return content;
+      }
+      throw new Error('invalid file');
+    }
+
+    // Use TOML to rebuild with proper formatting
+    let result = content;
+    const pathToVersion = parsed.project ? ['project', 'version'] : ['tool', 'poetry', 'version'];
+    result = replaceTomlValue(result, pathToVersion, this.version.toString());
+
+    // Then, update extra-versions if provided
+    if (this.extraVersions && Object.keys(this.extraVersions).length > 0) {
+      const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions: this.extraVersions});
+      result = extraUpd.updateContent(result);
+    }
+
+    return result;
+  }
+}
+
+export { PyProjectCombinedUpdater };
 
 export class PythonWorkspace extends WorkspacePlugin<Package> {
   private normalizedToCanonical: Map<string, string> = new Map();
@@ -370,9 +426,16 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       } else if (update.path === addPath(existingCandidate.path, 'setup.py')) {
         update.updater = new CompositeUpdater(wrapUpdater(update.updater) as any, wrapUpdater(new SetupPy({version: newVersion!})) as any) as any;
       } else if (update.path === addPath(existingCandidate.path, 'pyproject.toml')) {
-        const base = wrapUpdater(update.updater);
-        const pyprojUpd = wrapUpdater(new PyProjectToml({version: newVersion!}));
-        update.updater = new CompositeUpdater(base as any, pyprojUpd as any) as any;
+        // Use combined updater to handle both version and extra-versions in one pass
+        const extraVersions: Record<string, string> = {};
+        for (const [depNorm, defPath] of this.extraVersionsDefinedIn.entries()) {
+          if (defPath === update.path && normalizedUpdated.has(depNorm)) {
+            const canonical = this.normalizedToCanonical.get(depNorm) || depNorm;
+            const ver = normalizedUpdated.get(depNorm);
+            if (ver) extraVersions[canonical] = ver.toString();
+          }
+        }
+        update.updater = new PyProjectCombinedUpdater(newVersion!, Object.keys(extraVersions).length > 0 ? extraVersions : undefined) as any;
       }
       return update;
     });
@@ -486,8 +549,14 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
       if (!targetCandidate) targetCandidate = candidates[0];
 
-      const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
       const existing = targetCandidate.pullRequest.updates.find(u => u.path === pyprojectPath);
+      // Skip if already using combined updater (which handles extra-versions)
+      if (existing && existing.updater instanceof PyProjectCombinedUpdater) {
+        this.logger.debug(`Skipping extra-versions update for ${pyprojectPath} - already handled by combined updater`);
+        continue;
+      }
+      
+      const extraUpd = new PyProjectExtraVersionsUpdater({extraVersions});
       if (existing) existing.updater = new CompositeUpdater(existing.updater, extraUpd as any);
       else targetCandidate.pullRequest.updates.push({path: pyprojectPath, createIfMissing: false, updater: extraUpd as any});
     }
