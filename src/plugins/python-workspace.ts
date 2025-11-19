@@ -613,7 +613,32 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
           
           if (parentPkg?.version) {
             const currentVersion = Version.parse(parentPkg.version);
-            const newVersion = new PatchVersionUpdate().bump(currentVersion);
+            let newVersion = new PatchVersionUpdate().bump(currentVersion);
+            
+            // Check if any dependency has a major or minor bump
+            // If so, bump parent's minor version instead of patch
+            let hasMinorOrMajorBump = false;
+            for (const [depNorm, depNewVersion] of updatedVersions.entries()) {
+              const depNormalized = normalizePkgName(String(depNorm));
+              const depOldVersion = this.extraVersions.get(depNormalized);
+              if (depOldVersion) {
+                const oldVer = Version.parse(depOldVersion);
+                const newVer = depNewVersion as Version;
+                // Check if major or minor bumped
+                if (newVer.major > oldVer.major || newVer.minor > oldVer.minor) {
+                  hasMinorOrMajorBump = true;
+                  this.logger.info(`Detected minor/major bump in ${depNormalized}: ${oldVer} -> ${newVer}`);
+                  break;
+                }
+              }
+            }
+            
+            if (hasMinorOrMajorBump) {
+              // Bump minor version instead of patch
+              newVersion = new Version(currentVersion.major, currentVersion.minor + 1, 0, currentVersion.preRelease);
+              this.logger.info(`Parent has dependency with minor/major bump, bumping to ${newVersion}`);
+            }
+            
             parentsToVersionBump.set(pyprojectPath, newVersion);
             this.logger.info(`Will bump ${parentDir} from ${currentVersion} to ${newVersion}`);
           } else {
