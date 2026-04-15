@@ -400,15 +400,21 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
 
   protected bumpVersion(pkg: Package): Version {
     const norm = normalizePkgName(pkg.name);
+
+    if (pkg.version) {
+      return new PatchVersionUpdate().bump(Version.parse(pkg.version));
+    }
+
+    // Only fall back to extraVersions when the package has no version file of its own.
+    // Even then, bump it rather than returning the raw stored value.
     const extra = this.extraVersions.get(norm);
     if (extra) {
-      return Version.parse(extra);
+      this.logger.info(`No static version for ${pkg.name}; using extra-version ${extra} as base and bumping`);
+      return new PatchVersionUpdate().bump(Version.parse(extra));
     }
-    if (!pkg.version) {
-      this.logger.info(`No static version for ${pkg.name}; falling back to 0.1.0`);
-      return Version.parse('0.1.0');
-    }
-    return new PatchVersionUpdate().bump(Version.parse(pkg.version));
+
+    this.logger.info(`No static version for ${pkg.name}; falling back to 0.1.0`);
+    return Version.parse('0.1.0');
   }
 
   protected updateCandidate(
