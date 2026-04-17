@@ -59,6 +59,17 @@ interface EnhancedPyProject extends PyProject {
   };
 }
 
+// Only allow version updates in official Python package files and the manifest.
+// CHANGELOG.md and other files are intentionally excluded.
+function isPythonPackageVersionFile(filePath: string): boolean {
+  const fileName = filePath.split('/').pop() || '';
+  const allowedFiles = ['setup.py', 'setup.cfg', 'pyproject.toml', 'version.py', '__init__.py'];
+  if (allowedFiles.includes(fileName)) return true;
+  // Always allow the release-please manifest so version entries get updated
+  if (filePath === '.release-please-manifest.json') return true;
+  return false;
+}
+
 function wrapUpdater(u: any): {updateContent(old?: string): string} {
   if (!u) return {updateContent: (old?: string) => old || ''};
   if (typeof u.updateContent === 'function') return u;
@@ -471,6 +482,14 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     }
 
     if (!newVersion) throw new Error(`Version resolution failed for ${pkg.name}`);
+
+    // Filter out non-Python package files (e.g. CHANGELOG.md) — these are handled
+    // by the root strategy and should not be duplicated in subfolder candidates.
+    existingCandidate.pullRequest.updates = existingCandidate.pullRequest.updates.filter(update => {
+      if (isPythonPackageVersionFile(update.path)) return true;
+      this.logger.info(`Filtering out non-Python package file from updates: ${update.path}`);
+      return false;
+    });
 
     existingCandidate.pullRequest.updates = existingCandidate.pullRequest.updates.map(update => {
       if (update.path === addPath(existingCandidate.path, 'setup.cfg')) {
