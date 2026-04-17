@@ -509,27 +509,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
       }
     }
 
-    const dependencyNotes = this.getChangelogDepsNotes(pkg, normalizedUpdated);
-    if (dependencyNotes) {
-      existingCandidate.pullRequest.updates = existingCandidate.pullRequest.updates.map(update => {
-        if (update.updater instanceof Changelog) {
-          update.updater.changelogEntry = appendDependenciesSectionToChangelog(update.updater.changelogEntry, dependencyNotes, this.logger);
-        }
-        return update;
-      });
-
-      if (existingCandidate.pullRequest.body.releaseData.length > 0) {
-        existingCandidate.pullRequest.body.releaseData[0].notes = appendDependenciesSectionToChangelog(existingCandidate.pullRequest.body.releaseData[0].notes, dependencyNotes, this.logger);
-        existingCandidate.pullRequest.body.releaseData[0].version = newVersion;
-      } else {
-        existingCandidate.pullRequest.body.releaseData.push({
-          component: this.normalizedToCanonical.get(normName) || pkg.name,
-          version: newVersion,
-          notes: appendDependenciesSectionToChangelog('', dependencyNotes, this.logger),
-        });
-      }
-    }
-
     return existingCandidate;
   }
 
@@ -541,8 +520,6 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const newVersion = normalizedUpdated.get(normName);
     if (!newVersion) throw new Error(`Didn't find updated version for ${pkg.name}`);
 
-    const dependencyNotes = this.getChangelogDepsNotes(pkg, normalizedUpdated);
-
     const updates: any[] = [];
     if (pkg.setupCfg !== null) updates.push({path: addPath(pkg.path, 'setup.cfg'), createIfMissing: false, updater: new SetupCfg({version: newVersion})});
     if (pkg.setupPy !== null) updates.push({path: addPath(pkg.path, 'setup.py'), createIfMissing: false, updater: new SetupPy({version: newVersion})});
@@ -551,17 +528,10 @@ export class PythonWorkspace extends WorkspacePlugin<Package> {
     const versionPyFiles = await this.github.findFilesByFilenameAndRef('version.py', this.targetBranch, pkg.path);
     for (const vf of versionPyFiles) updates.push({path: addPath(pkg.path, vf), createIfMissing: false, updater: new PythonFileWithVersion({version: newVersion})});
 
-    try {
-      await this.github.getFileContentsOnBranch(addPath(pkg.path, 'CHANGELOG.md'), this.targetBranch);
-      updates.push({path: addPath(pkg.path, 'CHANGELOG.md'), createIfMissing: false, updater: new Changelog({version: newVersion, changelogEntry: dependencyNotes})});
-    } catch {
-      /* no changelog; skip */
-    }
-
     const canonical = this.normalizedToCanonical.get(normName) || pkg.name;
     const pullRequest: ReleasePullRequest = {
       title: PullRequestTitle.ofTargetBranch(this.targetBranch),
-      body: new PullRequestBody([{component: canonical, version: newVersion, notes: appendDependenciesSectionToChangelog('', dependencyNotes, this.logger)}]),
+      body: new PullRequestBody([{component: canonical, version: newVersion, notes: ''}]),
       updates,
       labels: [],
       headRefName: BranchName.ofTargetBranch(this.targetBranch).toString(),
